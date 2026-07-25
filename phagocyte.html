@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>PHAGOCYTE // fibrosis clearance</title>
+<style>
+  /* ---- lab-instrument readout aesthetic ---- */
+  :root{
+    --bg:#10151b;
+    --slate:#2b333d;
+    --ink:#cfd8e0;
+    --dim:#7c8794;
+    --line:#3a4654;
+    --teal:#36c9c2;
+    --crimson:#d83a5e;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    -webkit-font-smoothing:antialiased;overflow:hidden;}
+  #app{display:flex;gap:0;height:100%;align-items:stretch;justify-content:center;}
+  #gameWrap{position:relative;background:#000;}
+  canvas#game{display:block;cursor:crosshair;}
+  aside#panel{width:252px;min-width:252px;background:var(--bg);
+    border-left:1px solid var(--line);padding:14px 14px 10px;overflow:hidden;
+    display:flex;flex-direction:column;gap:12px;}
+  .eyebrow{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--dim);}
+  h1{margin:0;font-family:"Arial Black","Helvetica Neue",sans-serif;
+    font-size:20px;line-height:1;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--teal);}
+  h1 small{display:block;font-family:inherit;font-weight:normal;font-size:10px;
+    letter-spacing:.18em;color:var(--dim);margin-top:5px;}
+  .rule{height:1px;background:var(--line);}
+  .stats{font-size:12px;line-height:1.7;}
+  .stats .row{display:flex;justify-content:space-between;}
+  .stats .k{color:var(--dim);text-transform:uppercase;letter-spacing:.1em;font-size:10px;}
+  .stats .v{color:var(--ink);}
+  .invhead{display:flex;justify-content:space-between;align-items:baseline;}
+  .invhead .count{font-size:10px;color:var(--dim);}
+  #invGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;}
+  .cell{aspect-ratio:1/1;border:1px solid var(--line);background:#161c23;border-radius:2px;
+    display:flex;align-items:center;justify-content:center;position:relative;}
+  .cell .chip{width:62%;height:62%;border-radius:2px;border:1px solid rgba(255,255,255,.25);}
+  .cell .tt{display:none;}
+  #tip{position:fixed;pointer-events:none;z-index:30;max-width:200px;
+    background:#0a0e13;border:1px solid var(--line);padding:7px 9px;border-radius:3px;
+    font-size:11px;line-height:1.5;display:none;}
+  #tip .nm{font-weight:bold;}
+  #tip .sub{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.08em;}
+  .foot{margin-top:auto;font-size:10px;color:var(--dim);line-height:1.6;}
+  .foot b{color:var(--ink);font-weight:normal;}
+  @media (max-width:900px){
+    #app{flex-direction:column;align-items:center;}
+    aside#panel{width:100%;min-width:0;border-left:none;border-top:1px solid var(--line);}
+    #invGrid{grid-template-columns:repeat(10,1fr);}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="gameWrap"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <div>
+      <div class="eyebrow">clearance protocol</div>
+      <h1>Phagocyte<small>iPSC-derived macrophage // fibrosis ward</small></h1>
+    </div>
+    <div class="rule"></div>
+    <div class="stats" id="stats"></div>
+    <div class="rule"></div>
+    <div class="invhead">
+      <div class="eyebrow">reagent cache</div>
+      <div class="count" id="invCount">0 / 40</div>
+    </div>
+    <div id="invGrid"></div>
+    <div class="foot">
+      <b>L-click</b> move &middot; on a cell, lunge to engulf<br>
+      <b>L-click</b> a dropped reagent to collect<br>
+      hold to keep moving / engulfing
+    </div>
+  </aside>
+</div>
+<div id="tip"></div>
+
+<script>
+/* =======================================================================
+   CONFIG  --  every tunable lives here. no buried numbers below this block.
+   ======================================================================= */
+const CONFIG = {
+  // ---- viewport ----
+  canvasW: 760,
+  canvasH: 564,
+  tile: 47,                 // floor tile size, px
+  worldW: 2280,             // scrolling world, ~3x viewport
+  worldH: 1692,
+
+  // ---- player (macrophage) ----
+  pRadius: 15,
+  pSpeed: 3.0,             // px / frame
+  pMaxHp: 100,
+  pAttack: 12,             // damage per engulf
+  pRange: 40,             // engulf reach, centre-to-centre px
+  pCooldown: 26,          // frames between engulfs
+  pBumpAttack: 3,         // attack gained per level
+
+  // ---- enemy (rogue fibroblast) ----
+  eRadius: 13,
+  eSpeed: 1.15,
+  eMaxHp: 30,
+  eAttack: 6,             // damage to player per strike
+  eRange: 27,
+  eCooldown: 46,
+  eXp: 18,                // xp granted per kill
+  eMax: 6,                // concurrent cap
+  eRespawn: 80,           // frames between respawns
+  eSpawnMin: 280,         // ring around player: spawn radius min
+  eSpawnMax: 560,         // ring around player: spawn radius max
+
+  // ---- loot rarity (reagent grade) ----
+  rarities: [
+    { key:'technical', name:'Technical grade',  color:'#c2c9d0', weight:58 },
+    { key:'acs',       name:'ACS grade',        color:'#54a6ff', weight:26 },
+    { key:'molbio',    name:'Mol-bio grade',    color:'#ffd23f', weight:11 },
+    { key:'gmp',       name:'GMP grade',        color:'#3ad67e', weight:4  },
+    { key:'reference', name:'Reference std',    color:'#ff8c1a', weight:1  },
+  ],
+
+  // ---- item bases (surface receptors + cytokines, ASCII names) ----
+  bases: [
+    {n:'CD206 receptor', t:'receptor'}, {n:'CD163 receptor', t:'receptor'},
+    {n:'MerTK receptor', t:'receptor'}, {n:'CD36 receptor', t:'receptor'},
+    {n:'MARCO receptor', t:'receptor'}, {n:'TLR4 receptor', t:'receptor'},
+    {n:'CD68 receptor', t:'receptor'},  {n:'Axl receptor', t:'receptor'},
+    {n:'IL-10 cytokine', t:'cytokine'}, {n:'IL-4 cytokine', t:'cytokine'},
+    {n:'IFN-g cytokine', t:'cytokine'}, {n:'TNF-a cytokine', t:'cytokine'},
+    {n:'IL-1b cytokine', t:'cytokine'}, {n:'CCL2 cytokine', t:'cytokine'},
+    {n:'GM-CSF cytokine', t:'cytokine'},{n:'IL-13 cytokine', t:'cytokine'},
+  ],
+
+  // ---- progression ----
+  xpBase: 40,             // xp to clear level 1
+  xpMult: 1.5,            // multiplier per level
+
+  // ---- inventory ----
+  invCols: 5,
+  invRows: 8,
+
+  // ---- palette ----
+  col: {
+    floorA:'#353f4b', floorB:'#2c3540', grout:'#222a32',
+    rot:'#c2304f', rotDark:'#5e132c',
+    teal:'#36c9c2', tealDark:'#0f4f4d', nucleus:'#0c2f2e',
+    fib:'#d83a5e', fibDark:'#6e1530', fibCore:'#2a0a13',
+    hp:'#d83a5e', hpBack:'#2a0e16', xp:'#36c9c2',
+  },
+};
+
+/* =======================================================================
+   setup
+   ======================================================================= */
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+cv.style.width = CONFIG.canvasW + 'px';
+cv.style.height = CONFIG.canvasH + 'px';
+cv.width = CONFIG.canvasW * dpr;
+cv.height = CONFIG.canvasH * dpr;
+ctx.scale(dpr, dpr);
+const W = CONFIG.canvasW, H = CONFIG.canvasH;
+const cam = {x:0, y:0};
+
+const rnd = (a,b)=>a+Math.random()*(b-a);
+const clamp=(v,lo,hi)=>v<lo?lo:v>hi?hi:v;
+const dist=(ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
+const pick=a=>a[(Math.random()*a.length)|0];
+
+function xpFor(level){ return Math.round(CONFIG.xpBase * Math.pow(CONFIG.xpMult, level-1)); }
+
+function rollRarity(){
+  const tot = CONFIG.rarities.reduce((s,r)=>s+r.weight,0);
+  let r = Math.random()*tot;
+  for(const x of CONFIG.rarities){ if((r-=x.weight)<=0) return x; }
+  return CONFIG.rarities[0];
+}
+function rarityIndex(rar){ return CONFIG.rarities.indexOf(rar); }
+
+function makeItem(){
+  const rar = rollRarity();
+  const base = pick(CONFIG.bases);
+  const idx = rarityIndex(rar);
+  const stat = Math.round(rnd(2,4) * (idx+1));      // grade scales the roll
+  return { base:base.n, type:base.t, rar, stat };
+}
+function itemName(it){ return it.rar.name + ' ' + it.base; }
+
+/* =======================================================================
+   state
+   ======================================================================= */
+const player = {
+  x:CONFIG.worldW/2, y:CONFIG.worldH/2, hp:CONFIG.pMaxHp, maxHp:CONFIG.pMaxHp,
+  level:1, xp:0, xpNext:xpFor(1), attack:CONFIG.pAttack,
+  cd:0, anim:0, animDir:0, hitFlash:0, deadFlash:0,
+};
+let enemies = [];
+let drops = [];
+const inv = [];
+let respawn = 0;
+let markers = [];          // tap-feedback rings
+let hintTtl = 420;         // fading control hint at start
+
+const mouse = { x:W/2, y:H/2, down:false };
+let intent = { type:'idle', target:null };   // move | engulf | collect
+const log = [];                               // {text,color,ttl}
+
+// static floor decor + fibrotic stains, generated once across the world
+const decor = [];
+for(let i=0;i<16;i++){ decor.push({x:rnd(40,CONFIG.worldW-40), y:rnd(40,CONFIG.worldH-40), r:rnd(16,34)}); }
+const stains = [];
+for(let i=0;i<24;i++){ stains.push({x:rnd(0,CONFIG.worldW), y:rnd(0,CONFIG.worldH), r:rnd(30,90)}); }
+
+/* =======================================================================
+   spawning
+   ======================================================================= */
+function spawnEnemy(){
+  let x,y,tries=0;
+  do{
+    const a=rnd(0,Math.PI*2), r=rnd(CONFIG.eSpawnMin,CONFIG.eSpawnMax);
+    x=clamp(player.x+Math.cos(a)*r, 30, CONFIG.worldW-30);
+    y=clamp(player.y+Math.sin(a)*r, 30, CONFIG.worldH-30);
+    tries++;
+  } while(dist(x,y,player.x,player.y)<CONFIG.eSpawnMin*0.7 && tries<20);
+  enemies.push({ x,y, hp:CONFIG.eMaxHp, maxHp:CONFIG.eMaxHp, cd:rnd(0,CONFIG.eCooldown),
+                 hitFlash:0, ang:rnd(0,Math.PI*2) });
+}
+for(let i=0;i<CONFIG.eMax;i++) spawnEnemy();
+
+function addLog(text,color){
+  log.unshift({text,color,ttl:200});
+  if(log.length>4) log.pop();
+}
+
+/* =======================================================================
+   input  --  D2 left-click: move, or engulf enemy, or collect drop
+   ======================================================================= */
+function toLocal(e){
+  const r = cv.getBoundingClientRect();
+  const cx = (e.touches? e.touches[0].clientX : e.clientX) - r.left;
+  const cy = (e.touches? e.touches[0].clientY : e.clientY) - r.top;
+  return { x: cx*(W/r.width), y: cy*(H/r.height) };
+}
+function evaluateIntent(){
+  const wx=mouse.x+cam.x, wy=mouse.y+cam.y;     // screen -> world
+  // what is under the cursor right now
+  let hitE=null, dE=1e9;
+  for(const en of enemies){ const d=dist(wx,wy,en.x,en.y); if(d<CONFIG.eRadius+10 && d<dE){dE=d;hitE=en;} }
+  if(hitE){ intent={type:'engulf', target:hitE}; return; }
+  let hitD=null, dD=1e9;
+  for(const dr of drops){ const d=dist(wx,wy,dr.x,dr.y); if(d<18 && d<dD){dD=d;hitD=dr;} }
+  if(hitD){ intent={type:'collect', target:hitD}; return; }
+  intent={type:'move', target:{x:wx,y:wy}};
+}
+function pushMarker(){
+  hintTtl=0;
+  if(intent.type==='engulf' && intent.target) markers.push({x:intent.target.x,y:intent.target.y,t:18,kind:'engulf'});
+  else if(intent.target) markers.push({x:intent.target.x,y:intent.target.y,t:18,kind:'move'});
+}
+cv.addEventListener('mousedown', e=>{ if(e.button!==0)return; const p=toLocal(e); mouse.x=p.x;mouse.y=p.y;mouse.down=true; evaluateIntent(); pushMarker(); });
+cv.addEventListener('mousemove', e=>{ const p=toLocal(e); mouse.x=p.x;mouse.y=p.y; });
+window.addEventListener('mouseup', ()=>{ mouse.down=false; });
+cv.addEventListener('contextmenu', e=>e.preventDefault());
+// touch
+cv.addEventListener('touchstart', e=>{ e.preventDefault(); const p=toLocal(e); mouse.x=p.x;mouse.y=p.y;mouse.down=true; evaluateIntent(); pushMarker(); }, {passive:false});
+cv.addEventListener('touchmove', e=>{ e.preventDefault(); const p=toLocal(e); mouse.x=p.x;mouse.y=p.y; }, {passive:false});
+cv.addEventListener('touchend', ()=>{ mouse.down=false; }, {passive:false});
+
+/* =======================================================================
+   update
+   ======================================================================= */
+function stepToward(o, tx, ty, speed){
+  const d = dist(o.x,o.y,tx,ty);
+  if(d<=speed){ o.x=tx; o.y=ty; return 0; }
+  o.x += (tx-o.x)/d*speed;
+  o.y += (ty-o.y)/d*speed;
+  return d;
+}
+
+function levelUp(){
+  player.level++;
+  player.attack += CONFIG.pBumpAttack;
+  player.hp = player.maxHp;                 // D2 heals on level up
+  player.xpNext = xpFor(player.level);
+  addLog('Differentiation  ->  level '+player.level+'  (+'+CONFIG.pBumpAttack+' ATK)', CONFIG.col.teal);
+}
+
+function killEnemy(en){
+  const it = makeItem();
+  drops.push({ x:en.x, y:en.y, item:it, bob:rnd(0,Math.PI*2) });
+  player.xp += CONFIG.eXp;
+  while(player.xp >= player.xpNext){ player.xp -= player.xpNext; levelUp(); }
+  enemies = enemies.filter(e=>e!==en);
+  if(intent.target===en){ intent={type:'idle',target:null}; }
+  respawn = CONFIG.eRespawn;
+}
+
+function update(){
+  // refresh intent while button held (hold-to-move / hold-to-engulf)
+  if(mouse.down) evaluateIntent();
+
+  // ---- player movement + actions per intent ----
+  if(intent.type==='move' && intent.target){
+    stepToward(player, intent.target.x, intent.target.y, CONFIG.pSpeed);
+  } else if(intent.type==='engulf' && intent.target){
+    const en = intent.target;
+    if(!enemies.includes(en)){ intent={type:'idle',target:null}; }
+    else{
+      const d = dist(player.x,player.y,en.x,en.y);
+      if(d > CONFIG.pRange){ stepToward(player, en.x, en.y, CONFIG.pSpeed); }
+      else if(player.cd<=0){
+        en.hp -= player.attack; en.hitFlash=10;
+        player.cd = CONFIG.pCooldown; player.anim=10;
+        player.animDir = Math.atan2(en.y-player.y, en.x-player.x);
+        if(en.hp<=0) killEnemy(en);
+      }
+    }
+  } else if(intent.type==='collect' && intent.target){
+    const dr = intent.target;
+    if(!drops.includes(dr)){ intent={type:'idle',target:null}; }
+    else{
+      const d = stepToward(player, dr.x, dr.y, CONFIG.pSpeed);
+      if(d < CONFIG.pRadius+6){
+        if(inv.length < CONFIG.invCols*CONFIG.invRows){
+          inv.push(dr.item);
+          addLog('Collected  '+itemName(dr.item)+'  (+'+dr.item.stat+')', dr.item.rar.color);
+          renderInventory();
+        } else {
+          addLog('Cache full', CONFIG.col.fib);
+        }
+        drops = drops.filter(x=>x!==dr);
+        intent={type:'idle',target:null};
+      }
+    }
+  }
+  player.x = clamp(player.x, CONFIG.pRadius, CONFIG.worldW-CONFIG.pRadius);
+  player.y = clamp(player.y, CONFIG.pRadius, CONFIG.worldH-CONFIG.pRadius);
+  if(player.cd>0) player.cd--;
+  if(player.anim>0) player.anim--;
+  if(player.hitFlash>0) player.hitFlash--;
+  if(player.deadFlash>0) player.deadFlash--;
+
+  // ---- enemies ----
+  for(const en of enemies){
+    const d = dist(en.x,en.y,player.x,player.y);
+    en.ang = Math.atan2(player.y-en.y, player.x-en.x);
+    if(d > CONFIG.eRange){ stepToward(en, player.x, player.y, CONFIG.eSpeed); }
+    else if(en.cd<=0){
+      player.hp -= CONFIG.eAttack; player.hitFlash=8; en.cd=CONFIG.eCooldown;
+    }
+    if(en.cd>0) en.cd--;
+    if(en.hitFlash>0) en.hitFlash--;
+  }
+
+  // ---- player death -> respawn centre, no penalty in V1 ----
+  if(player.hp<=0){
+    player.hp = player.maxHp;
+    player.x=CONFIG.worldW/2; player.y=CONFIG.worldH/2;
+    player.deadFlash=24; intent={type:'idle',target:null};
+    addLog('Apoptosis averted  ->  reseeded at centre', CONFIG.col.fib);
+  }
+
+  // ---- maintain enemy population ----
+  if(enemies.length < CONFIG.eMax){
+    if(respawn>0) respawn--; else { spawnEnemy(); respawn=CONFIG.eRespawn; }
+  }
+
+  // ---- decay drop bob + markers + log ----
+  for(const dr of drops) dr.bob += 0.05;
+  for(let i=markers.length-1;i>=0;i--){ if(--markers[i].t<=0) markers.splice(i,1); }
+  for(const l of log) l.ttl--;
+  while(log.length && log[log.length-1].ttl<=0) log.pop();
+}
+
+/* =======================================================================
+   render
+   ======================================================================= */
+function drawFloor(){
+  const T=CONFIG.tile;
+  const x0=Math.floor(cam.x/T)*T, y0=Math.floor(cam.y/T)*T;
+  const x1=cam.x+W, y1=cam.y+H;
+  for(let y=y0;y<y1;y+=T){
+    for(let x=x0;x<x1;x+=T){
+      const odd = (((x/T)|0)+((y/T)|0))&1;
+      ctx.fillStyle = odd?CONFIG.col.floorB:CONFIG.col.floorA;
+      ctx.fillRect(x,y,T,T);
+    }
+  }
+  ctx.strokeStyle=CONFIG.col.grout; ctx.lineWidth=1;
+  for(let x=x0;x<=x1;x+=T){ ctx.beginPath();ctx.moveTo(x,cam.y);ctx.lineTo(x,cam.y+H);ctx.stroke(); }
+  for(let y=y0;y<=y1;y+=T){ ctx.beginPath();ctx.moveTo(cam.x,y);ctx.lineTo(cam.x+W,y);ctx.stroke(); }
+  // fibrotic stains (theme: corruption spreading on the floor)
+  for(const s of stains){
+    if(s.x<cam.x-s.r||s.x>cam.x+W+s.r||s.y<cam.y-s.r||s.y>cam.y+H+s.r) continue;
+    const g=ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,s.r);
+    g.addColorStop(0,'rgba(194,48,79,0.18)');
+    g.addColorStop(1,'rgba(194,48,79,0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,7); ctx.fill();
+  }
+  // petri-dish decor
+  for(const d of decor){
+    if(d.x<cam.x-d.r||d.x>cam.x+W+d.r||d.y<cam.y-d.r||d.y>cam.y+H+d.r) continue;
+    ctx.strokeStyle='rgba(54,201,194,0.16)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(d.x,d.y,d.r,0,7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(d.x,d.y,d.r-4,0,7); ctx.stroke();
+  }
+}
+function updateCamera(){
+  cam.x = clamp(player.x-W/2, 0, CONFIG.worldW-W);
+  cam.y = clamp(player.y-H/2, 0, CONFIG.worldH-H);
+}
+function drawMarkers(){
+  // standing destination ring while a move is queued
+  if(intent.type==='move' && intent.target){
+    const t=performance.now()/200;
+    ctx.strokeStyle='rgba(54,201,194,0.65)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(intent.target.x,intent.target.y,7+Math.sin(t)*2,0,7); ctx.stroke();
+  }
+  // expanding tap rings (feedback that a tap landed)
+  for(const m of markers){
+    const p=1-m.t/18, r=6+p*22, a=m.t/18;
+    ctx.strokeStyle = m.kind==='engulf' ? 'rgba(216,58,94,'+a+')' : 'rgba(54,201,194,'+a+')';
+    ctx.lineWidth=2; ctx.beginPath(); ctx.arc(m.x,m.y,r,0,7); ctx.stroke();
+  }
+}
+function drawVignette(){
+  const vg=ctx.createRadialGradient(W/2,H/2,H*0.35,W/2,H/2,H*0.9);
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.55)');
+  ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+}
+function drawHint(){
+  if(hintTtl<=0) return; hintTtl--;
+  ctx.globalAlpha=clamp(hintTtl/60,0,1);
+  ctx.fillStyle='rgba(8,12,16,0.8)'; ctx.fillRect(W/2-152,H-92,304,40);
+  ctx.font='12px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillStyle=CONFIG.col.teal; ctx.fillText('tap floor to move', W/2, H-72);
+  ctx.fillStyle='#cfd8e0'; ctx.fillText('tap a red fibroblast to engulf it', W/2, H-56);
+  ctx.textAlign='left'; ctx.globalAlpha=1;
+}
+
+function drawMacrophage(p){
+  const t = performance.now()/280;
+  ctx.save(); ctx.translate(p.x,p.y);
+  // engulf lunge: stretch toward target on attack frames
+  const lunge = p.anim>0 ? Math.sin((p.anim/10)*Math.PI)*7 : 0;
+  // soft cyto glow
+  const gl=ctx.createRadialGradient(0,0,0,0,0,CONFIG.pRadius*2.2);
+  gl.addColorStop(0,'rgba(54,201,194,0.35)'); gl.addColorStop(1,'rgba(54,201,194,0)');
+  ctx.fillStyle=gl; ctx.beginPath(); ctx.arc(0,0,CONFIG.pRadius*2.2,0,7); ctx.fill();
+  // membrane: wobbly blob, extended toward animDir
+  ctx.beginPath();
+  const lobes=14;
+  for(let i=0;i<=lobes;i++){
+    const a=(i/lobes)*Math.PI*2;
+    let rr=CONFIG.pRadius*(1+0.12*Math.sin(a*3+t));
+    const align=Math.cos(a-p.animDir);
+    rr += lunge*Math.max(0,align);                 // pseudopod toward prey
+    const x=Math.cos(a)*rr, y=Math.sin(a)*rr;
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+  }
+  ctx.closePath();
+  const bg=ctx.createRadialGradient(-4,-4,2,0,0,CONFIG.pRadius+lunge);
+  bg.addColorStop(0,'#5fe7df'); bg.addColorStop(1,CONFIG.col.tealDark);
+  ctx.fillStyle = p.hitFlash>0 ? '#ffffff' : bg;
+  ctx.fill();
+  ctx.lineWidth=1.5; ctx.strokeStyle='rgba(10,40,40,0.6)'; ctx.stroke();
+  // nucleus
+  ctx.fillStyle=CONFIG.col.nucleus;
+  ctx.beginPath(); ctx.arc(3,2,CONFIG.pRadius*0.42,0,7); ctx.fill();
+  ctx.fillStyle='rgba(95,231,223,0.5)';
+  ctx.beginPath(); ctx.arc(1,0,CONFIG.pRadius*0.18,0,7); ctx.fill();
+  ctx.restore();
+}
+
+function drawFibroblast(en){
+  ctx.save(); ctx.translate(en.x,en.y); ctx.rotate(en.ang);
+  // processes: thin spindly arms
+  ctx.strokeStyle=en.hitFlash>0?'#fff':CONFIG.col.fibDark; ctx.lineWidth=2;
+  for(const a of [-0.5,0.5,Math.PI-0.4,Math.PI+0.4]){
+    ctx.beginPath(); ctx.moveTo(0,0);
+    ctx.lineTo(Math.cos(a)*CONFIG.eRadius*1.9, Math.sin(a)*CONFIG.eRadius*1.4);
+    ctx.stroke();
+  }
+  // spindle body
+  ctx.beginPath();
+  ctx.ellipse(0,0,CONFIG.eRadius*1.5,CONFIG.eRadius*0.7,0,0,7);
+  const bg=ctx.createLinearGradient(-CONFIG.eRadius,0,CONFIG.eRadius,0);
+  bg.addColorStop(0,CONFIG.col.fibDark); bg.addColorStop(0.5,CONFIG.col.fib); bg.addColorStop(1,CONFIG.col.fibDark);
+  ctx.fillStyle=en.hitFlash>0?'#fff':bg; ctx.fill();
+  ctx.strokeStyle=CONFIG.col.fibCore; ctx.lineWidth=1; ctx.stroke();
+  // nucleus
+  ctx.fillStyle=CONFIG.col.fibCore;
+  ctx.beginPath(); ctx.ellipse(0,0,CONFIG.eRadius*0.5,CONFIG.eRadius*0.34,0,0,7); ctx.fill();
+  ctx.restore();
+  // hp bar when wounded
+  if(en.hp<en.maxHp){
+    const w=26, x=en.x-w/2, y=en.y-CONFIG.eRadius-9;
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(x-1,y-1,w+2,5);
+    ctx.fillStyle=CONFIG.col.fib; ctx.fillRect(x,y,w*(en.hp/en.maxHp),3);
+  }
+}
+
+function drawDrop(dr){
+  const yy = dr.y + Math.sin(dr.bob)*2;
+  const c = dr.item.rar.color;
+  // glow
+  const g=ctx.createRadialGradient(dr.x,yy,0,dr.x,yy,16);
+  g.addColorStop(0,c); g.addColorStop(0.25,c); g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.globalAlpha=0.5; ctx.fillStyle=g;
+  ctx.beginPath(); ctx.arc(dr.x,yy,16,0,7); ctx.fill(); ctx.globalAlpha=1;
+  // vial body
+  ctx.fillStyle=c;
+  ctx.fillRect(dr.x-3,yy-5,6,10);
+  ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.fillRect(dr.x-3,yy-7,6,2);
+  // D2-style ground label
+  const label = dr.item.base;
+  ctx.font='10px ui-monospace, monospace';
+  const tw = ctx.measureText(label).width;
+  ctx.fillStyle='rgba(8,12,16,0.8)';
+  ctx.fillRect(dr.x-tw/2-4, yy-24, tw+8, 13);
+  ctx.fillStyle=c; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label, dr.x, yy-17);
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+}
+
+function drawHud(){
+  // HP globe, bottom-left
+  const cx=42, cy=H-44, r=30;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,7); ctx.clip();
+  ctx.fillStyle=CONFIG.col.hpBack; ctx.fillRect(cx-r,cy-r,r*2,r*2);
+  const lvl = clamp(player.hp/player.maxHp,0,1);
+  ctx.fillStyle=CONFIG.col.hp;
+  ctx.fillRect(cx-r, cy+r-(r*2*lvl), r*2, r*2*lvl);
+  ctx.fillStyle='rgba(255,255,255,0.12)';
+  ctx.fillRect(cx-r, cy+r-(r*2*lvl), r*2, 3);
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,7);
+  ctx.strokeStyle=CONFIG.col.line; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText(Math.max(0,Math.ceil(player.hp))+'', cx, cy+4);
+  ctx.textAlign='left';
+
+  // XP bar, bottom strip
+  const bx=84, bw=W-96, by=H-18, bh=8;
+  ctx.fillStyle='rgba(8,12,16,0.8)'; ctx.fillRect(bx,by,bw,bh);
+  ctx.fillStyle=CONFIG.col.xp;
+  ctx.fillRect(bx,by,bw*clamp(player.xp/player.xpNext,0,1),bh);
+  ctx.strokeStyle=CONFIG.col.line; ctx.lineWidth=1; ctx.strokeRect(bx,by,bw,bh);
+  ctx.fillStyle=CONFIG.col.dim||'#7c8794'; ctx.font='9px ui-monospace,monospace';
+  ctx.fillText('LVL '+player.level, bx, by-4);
+
+  // pickup / event log, top-left
+  ctx.font='11px ui-monospace,monospace'; ctx.textBaseline='alphabetic';
+  for(let i=0;i<log.length;i++){
+    const l=log[i]; ctx.globalAlpha=clamp(l.ttl/60,0,1);
+    ctx.fillStyle='rgba(8,12,16,0.7)'; const tw=ctx.measureText(l.text).width;
+    ctx.fillRect(10, 14+i*18-11, tw+10, 15);
+    ctx.fillStyle=l.color; ctx.fillText(l.text, 15, 14+i*18);
+  }
+  ctx.globalAlpha=1;
+
+  // death pulse
+  if(player.deadFlash>0){
+    ctx.fillStyle='rgba(216,58,94,'+(player.deadFlash/24*0.4)+')';
+    ctx.fillRect(0,0,W,H);
+  }
+}
+
+function render(){
+  updateCamera();
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+    drawFloor();
+    drawMarkers();
+    for(const dr of drops) drawDrop(dr);
+    for(const en of enemies) drawFibroblast(en);
+    drawMacrophage(player);
+  ctx.restore();
+  drawVignette();
+  drawHud();
+  drawHint();
+}
+
+/* =======================================================================
+   panel (DOM)
+   ======================================================================= */
+const statsEl = document.getElementById('stats');
+const gridEl = document.getElementById('invGrid');
+const countEl = document.getElementById('invCount');
+const tip = document.getElementById('tip');
+
+function renderStats(){
+  statsEl.innerHTML =
+    row('differentiation','LVL '+player.level)+
+    row('phagocytic atk', player.attack)+
+    row('viability', Math.max(0,Math.ceil(player.hp))+' / '+player.maxHp)+
+    row('xp to next', Math.max(0,player.xpNext-player.xp));
+}
+function row(k,v){ return '<div class="row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>'; }
+
+function renderInventory(){
+  const cells = CONFIG.invCols*CONFIG.invRows;
+  let html='';
+  for(let i=0;i<cells;i++){
+    const it = inv[i];
+    if(it){
+      html+='<div class="cell" data-i="'+i+'"><div class="chip" style="background:'+it.rar.color+'"></div></div>';
+    } else {
+      html+='<div class="cell"></div>';
+    }
+  }
+  gridEl.innerHTML=html;
+  countEl.textContent = inv.length+' / '+cells;
+  // tooltips
+  gridEl.querySelectorAll('.cell[data-i]').forEach(c=>{
+    const it = inv[+c.dataset.i];
+    c.addEventListener('mousemove', e=>{
+      tip.style.display='block'; tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY+12)+'px';
+      tip.innerHTML='<div class="nm" style="color:'+it.rar.color+'">'+it.base+'</div>'+
+        '<div class="sub">'+it.rar.name+' &middot; '+it.type+'</div>'+
+        '<div>potency +'+it.stat+'</div>';
+    });
+    c.addEventListener('mouseleave', ()=>{ tip.style.display='none'; });
+  });
+}
+
+/* =======================================================================
+   loop
+   ======================================================================= */
+function frame(){
+  update();
+  render();
+  renderStats();
+  requestAnimationFrame(frame);
+}
+renderInventory();
+renderStats();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

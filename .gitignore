@@ -1,0 +1,9 @@
+# Working material kept locally, not published to the site
+files/
+full-context-files/
+showcase-files/
+_local/
+*.zip
+*.tar.gz
+*.glb
+.icon-build/

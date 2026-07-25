@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>CHOPPER</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; align-items: center;
+         justify-content: center; height: 100vh; overflow: hidden; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  .menu-btn { position: fixed; top: 12px; right: 12px; z-index: 1000; padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: #fff; cursor: pointer; font-size: 12px; border-radius: 4px; font-family: monospace; }
+  .menu-btn:active { background: rgba(255,255,255,0.2); }
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+// --- Logical resolution ---
+const PX_W = 320;
+const PX_H = Math.round(PX_W * (window.innerHeight / window.innerWidth));
+let SCALE  = 1;
+
+const px    = document.createElement('canvas');
+const pxCtx = px.getContext('2d');
+px.width    = PX_W;
+px.height   = PX_H;
+pxCtx.imageSmoothingEnabled = false;
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const DPR    = window.devicePixelRatio || 1;
+
+function resize() {
+  SCALE = Math.max(1, Math.floor(window.innerWidth / PX_W));
+  canvas.width  = PX_W * SCALE * DPR;
+  canvas.height = PX_H * SCALE * DPR;
+  canvas.style.width  = (PX_W * SCALE) + 'px';
+  canvas.style.height = (PX_H * SCALE) + 'px';
+  ctx.scale(DPR, DPR);
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Palettes ---
+const PAL = {
+  EARTH: [
+    '#0d0d0d','#1a1a2e','#2d4a1e','#4a7c3f','#7ab648','#c8e86b',
+    '#8b5e3c','#c49a5a','#f0d080','#3a1f0d','#e84040','#f8a030',
+    '#f8f8c0','#6888b0','#a8d8f0','#ffffff',
+  ],
+  SPACE: [
+    '#000000','#0a0a1a','#111133','#1a1a66','#2233aa','#4488ff',
+    '#88ccff','#ffffff','#ff2222','#ff8800','#ffdd00','#ff44aa',
+    '#aa00ff','#00ffcc','#334433','#aabbaa',
+  ],
+  MACHINE: [
+    '#0a0a0a','#1a1a1a','#2a2a2a','#444444','#666666','#999999',
+    '#cccccc','#ffffff','#ff4400','#ff8800','#ffdd00','#00cc44',
+    '#0088ff','#00ccff','#220022','#440088',
+  ],
+  OCEAN: [
+    '#000811','#001428','#002244','#003366','#004d99','#0077cc',
+    '#00aaee','#44ccff','#88eeff','#c8f8ff','#ffffff','#f8d080',
+    '#c8a050','#208040','#ff6644','#ff2200',
+  ],
+  DESERT: [
+    '#0d0805','#1a1005','#3a2010','#6b3a1f','#a05a28','#c8843c',
+    '#e8b060','#f8d888','#fff4cc','#ffffff','#4a6620','#88aa30',
+    '#cc8822','#882200','#ff4400','#220d00',
+  ],
+  ARCTIC: [
+    '#000408','#050d1a','#0a1a33','#1a3355','#2a5588','#4488bb',
+    '#88bbdd','#bbddee','#ddeef8','#ffffff','#eef8ff','#c8e0e8',
+    '#88aaaa','#445544','#ff4422','#ffdd88',
+  ],
+};
+
+// Biome definitions: palette key, bg index, rock dark/light indices,
+// accent index, smoke colour, cave name
+const BIOMES = [
+  { key:'EARTH',   bg:1,  rd:9,  rl:2,  acc:4,  smoke:'#aaaaaa', name:'JUNGLE CAVE'       },
+  { key:'DESERT',  bg:15, rd:2,  rl:3,  acc:6,  smoke:'#ddbb88', name:'SCORCHED TUNNELS'  },
+  { key:'ARCTIC',  bg:1,  rd:4,  rl:6,  acc:9,  smoke:'#cce8ff', name:'GLACIAL SHAFT'     },
+  { key:'OCEAN',   bg:1,  rd:2,  rl:4,  acc:7,  smoke:'#88eeff', name:'FLOODED PASSAGE'   },
+  { key:'MACHINE', bg:1,  rd:2,  rl:3,  acc:13, smoke:'#00ffcc', name:'ABANDONED FACILITY' },
+  { key:'SPACE',   bg:0,  rd:2,  rl:3,  acc:5,  smoke:'#88ccff', name:'DEEP RIFT'          },
+];
+
+// --- State ---
+const S = { MENU:0, PLAY:1, DEAD:2 };
+let state = S.MENU;
+
+// --- Input ---
+const keys  = {};
+const touch = { down: false };
+let thrust  = false;
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { e.preventDefault(); thrust = true; }
+});
+window.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'Space') thrust = false;
+});
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault(); touch.down = true; thrust = true;
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault(); touch.down = false; thrust = false;
+}, { passive: false });
+canvas.addEventListener('mousedown', () => { thrust = true; });
+canvas.addEventListener('mouseup',   () => { thrust = false; });
+
+// --- Constants ---
+const GRAVITY       = 280;
+const THRUST_FORCE  = 580;
+// Craft size multiplier. 1.0 = original. Scales the drawn sprite, the rotor
+// bar, and the collision box together so visuals and hitbox stay in step.
+const HELI_SCALE    = 1.2;
+const HELI_W        = Math.round(24 * HELI_SCALE);
+const HELI_H        = Math.round(10 * HELI_SCALE);
+// Drawn sprite size in logical px (source grid is 16x7).
+const SPR_W         = Math.round(16 * HELI_SCALE);
+const SPR_H         = Math.round(7  * HELI_SCALE);
+// Hitbox forgiveness: how far the collision box is inset from the drawn
+// sprite on each side. Larger = more forgiving. The box is derived from the
+// sprite's own draw rect, so visuals and collision cannot drift apart.
+const HIT_INSET_X   = 2;
+const HIT_INSET_Y   = 1;
+const MIN_GAP       = 52;   // guaranteed min terrain gap in logical px
+const TERRAIN_STEP  = 4;    // px per terrain column
+const SCROLL_SPEED  = 60;   // base px/s, increases with distance
+const BIOME_LEN     = 1800; // logical px per biome
+
+// --- Sprite: 16x7 military helicopter, facing right ---
+// Uses palette indices: 3=dark hull, 4=mid hull, 5=light hull,
+// 6=cockpit glass, 7=highlight, 8=rotor/danger, 9=exhaust
+const SPR_HELI = [
+  [0,0,0,0,0,0,0,5,5,5,5,5,0,0,0,0],
+  [0,0,0,0,0,5,5,4,4,4,4,4,5,0,0,0],
+  [0,8,8,8,4,4,6,6,4,4,3,3,4,5,5,0],
+  [3,4,4,4,4,4,4,6,4,4,4,4,4,4,4,3],
+  [0,3,3,4,4,4,4,4,4,4,3,3,3,3,0,0],
+  [0,0,0,3,0,0,3,0,0,3,0,0,0,0,0,0],
+  [0,0,0,3,0,0,3,0,0,3,0,0,0,0,0,0],
+];
+
+// --- Sprite helpers ---
+function drawSprite(sprite, palette, lx, ly, scale) {
+  for (let row = 0; row < sprite.length; row++) {
+    for (let col = 0; col < sprite[row].length; col++) {
+      const idx = sprite[row][col];
+      if (idx === 0) continue;
+      pxCtx.fillStyle = palette[idx];
+      pxCtx.fillRect(Math.round(lx + col*scale), Math.round(ly + row*scale), scale, scale);
+    }
+  }
+}
+
+// Draw a sprite at any scale, including non-integer, by nearest-neighbour
+// sampling into a destination pixel grid. Integer scales give identical
+// output to drawSprite; fractional scales duplicate a subset of rows and
+// columns rather than producing sub-pixel positions.
+function drawSpriteScaled(sprite, palette, lx, ly, scale) {
+  const sh = sprite.length, sw = sprite[0].length;
+  const dh = Math.max(1, Math.round(sh * scale));
+  const dw = Math.max(1, Math.round(sw * scale));
+  lx = Math.round(lx); ly = Math.round(ly);
+  for (let dy = 0; dy < dh; dy++) {
+    const sy = Math.min(sh - 1, Math.floor(dy * sh / dh));
+    for (let dx = 0; dx < dw; dx++) {
+      const sx = Math.min(sw - 1, Math.floor(dx * sw / dw));
+      const idx = sprite[sy][sx];
+      if (idx === 0) continue;
+      pxCtx.fillStyle = palette[idx];
+      pxCtx.fillRect(lx + dx, ly + dy, 1, 1);
+    }
+  }
+}
+
+// --- Craft geometry: one source of truth for where the sprite is drawn and
+// where its hitbox sits, so the two can never drift apart. ---
+function heliSpriteRect() {
+  return {
+    x: Math.round(heli.x - HELI_W),
+    y: Math.round(heli.y - HELI_H / 2 - 1),
+    w: SPR_W,
+    h: SPR_H,
+  };
+}
+
+function heliHitbox() {
+  const r = heliSpriteRect();
+  return {
+    left:   r.x + HIT_INSET_X,
+    right:  r.x + r.w - HIT_INSET_X,
+    top:    r.y + HIT_INSET_Y,
+    bottom: r.y + r.h - HIT_INSET_Y,
+  };
+}
+
+// --- Game state ---
+let heli, dist, speed, biomeIdx, biomeProgress, nextBiomeProgress;
+let palette, biome;
+let terrainCols;   // array of { ceil, floor } in logical px
+let scrollOffset;  // fractional pixel scroll accumulator
+let rocks;         // array of { worldX, y, w, h } -- world-space x, scrolled each frame
+let rockSpawnAccum;// distance accumulator for rock spawning
+let awaitingRelease = false;
+let best = 0;
+
+// Particle system
+const particles = [];
+
+function spawnParticles(x, y, count, color, spd, life, size, scrollVx = 0) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const v = (0.5 + Math.random() * 0.5) * spd;
+    particles.push({ x, y,
+                     vx: Math.cos(angle)*v + scrollVx,
+                     vy: Math.sin(angle)*v,
+                     life, maxLife: life, size, color });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 8 * dt; // slight droop
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function renderParticles() {
+  for (const p of particles) {
+    if (p.life / p.maxLife < 0.12) continue;
+    pxCtx.fillStyle = p.color;
+    pxCtx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size);
+  }
+}
+
+// --- Terrain ---
+// terrainCols is a ring of TERRAIN_COLS columns covering the screen plus one off-screen
+const TERRAIN_COLS = Math.ceil(PX_W / TERRAIN_STEP) + 4;
+
+function genCol(prevCeil, prevFloor, difficulty) {
+  const maxShift = 2 + difficulty * 1.5;
+  const minGap   = Math.max(MIN_GAP, 80 - difficulty * 8);
+
+  let ceil  = prevCeil  + (Math.random() * maxShift * 2 - maxShift);
+  let floor = prevFloor + (Math.random() * maxShift * 2 - maxShift);
+
+  ceil  = Math.max(4, Math.min(PX_H - minGap - 4, ceil));
+  floor = Math.min(PX_H - 4, Math.max(ceil + minGap, floor));
+
+  // Snap floor up if gap is too tight
+  if (floor - ceil < minGap) floor = ceil + minGap;
+  if (floor > PX_H - 4)     floor = PX_H - 4;
+
+  return { ceil: Math.round(ceil), floor: Math.round(floor) };
+}
+
+function initTerrain() {
+  terrainCols = [];
+  let c = PX_H * 0.22, f = PX_H * 0.78;
+  for (let i = 0; i < TERRAIN_COLS; i++) {
+    const col = genCol(c, f, 0);
+    c = col.ceil; f = col.floor;
+    terrainCols.push(col);
+  }
+}
+
+function shiftTerrain(difficulty) {
+  terrainCols.shift();
+  const last = terrainCols[terrainCols.length - 1];
+  terrainCols.push(genCol(last.ceil, last.floor, difficulty));
+}
+
+// --- Biome ---
+function setBiome(idx) {
+  biomeIdx  = idx % BIOMES.length;
+  biome     = BIOMES[biomeIdx];
+  palette   = PAL[biome.key];
+}
+
+// --- Init ---
+function startGame() {
+  heli = { x: 48, y: PX_H / 2, vy: 0, rotorPhase: 0 };
+  dist = 0; speed = SCROLL_SPEED;
+  biomeProgress = 0; nextBiomeProgress = BIOME_LEN;
+  setBiome(0);
+  particles.length = 0;
+  rocks = [];
+  rockSpawnAccum = 0;
+  scrollOffset = 0;
+  initTerrain();
+  awaitingRelease = false;
+  state = S.PLAY;
+}
+
+// --- Loop ---
+let lastT = 0;
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0);
+  lastT = t;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  switch (state) {
+    case S.MENU: updateMenu(dt); break;
+    case S.PLAY: updatePlay(dt); break;
+    case S.DEAD: updateDead(dt); break;
+  }
+}
+
+function render() {
+  pxCtx.clearRect(0, 0, PX_W, PX_H);
+  switch (state) {
+    case S.MENU: renderMenu(); break;
+    case S.PLAY: renderPlay(); break;
+    case S.DEAD: renderDead(); break;
+  }
+  ctx.clearRect(0, 0, PX_W * SCALE, PX_H * SCALE);
+  ctx.drawImage(px, 0, 0, PX_W * SCALE, PX_H * SCALE);
+}
+
+// --- MENU ---
+function updateMenu(dt) {
+  if (keys['Space'] || touch.down) { thrust = false; startGame(); }
+}
+
+function renderMenu() {
+  pxCtx.fillStyle = '#050510';
+  pxCtx.fillRect(0, 0, PX_W, PX_H);
+  // draw static silhouette terrain
+  pxCtx.fillStyle = '#1a1a2e';
+  pxCtx.fillRect(0, 0,      PX_W, 30);
+  pxCtx.fillRect(0, PX_H-30, PX_W, 30);
+  drawSpriteScaled(SPR_HELI, PAL.MACHINE, PX_W/2 - 12 * HELI_SCALE, PX_H/2 - 4 * HELI_SCALE, 2 * HELI_SCALE);
+  drawOverlay('CHOPPER', 'DAMAGED. KEEP FLYING.', 'HOLD SPACE / TAP TO FLY');
+}
+
+// --- PLAY ---
+function updatePlay(dt) {
+  // Speed and distance
+  dist  += speed * dt;
+  speed  = SCROLL_SPEED + dist * 0.018;
+  biomeProgress += speed * dt;
+
+  // Biome transition
+  if (biomeProgress >= nextBiomeProgress) {
+    setBiome(biomeIdx + 1);
+    nextBiomeProgress = biomeProgress + BIOME_LEN;
+  }
+
+  // Difficulty: 0 at start, approaches 8 asymptotically
+  const difficulty = Math.min(8, dist / 800);
+
+  // Scroll terrain
+  scrollOffset += speed * dt;
+  while (scrollOffset >= TERRAIN_STEP) {
+    scrollOffset -= TERRAIN_STEP;
+    shiftTerrain(difficulty);
+  }
+
+  // Scroll rocks and cull off-screen
+  for (const r of rocks) r.worldX -= speed * dt;
+  for (let i = rocks.length - 1; i >= 0; i--) {
+    if (rocks[i].worldX + rocks[i].w < 0) rocks.splice(i, 1);
+  }
+
+  // Spawn hanging rocks -- minimum 300px clear gap from start, then spacing shrinks with difficulty
+  rockSpawnAccum += speed * dt;
+  const rockInterval = Math.max(120, 280 - difficulty * 18);
+  if (dist > 300 && rockSpawnAccum >= rockInterval) {
+    rockSpawnAccum = 0;
+    // Pick a terrain column near the right edge to read gap bounds
+    const refCol = terrainCols[terrainCols.length - 6] || terrainCols[terrainCols.length - 1];
+    const gap    = refCol.floor - refCol.ceil;
+    const rh     = Math.max(6, Math.round(gap * 0.20));           // 20% of gap height
+    const rw     = Math.max(6, Math.round(rh * (0.8 + Math.random() * 0.8))); // 0.8-1.6x rh
+    const margin = 6;                                              // keep clear of walls
+    const minY   = refCol.ceil + margin;
+    const maxY   = refCol.floor - rh - margin;
+    if (maxY > minY) {
+      const ry = minY + Math.floor(Math.random() * (maxY - minY));
+      rocks.push({ worldX: PX_W + 8, y: ry, w: rw, h: rh });
+    }
+  }
+
+  // Heli physics -- falls by default, rises on thrust
+  const accel = thrust ? -(THRUST_FORCE - GRAVITY) : GRAVITY;
+  heli.vy = Math.max(-320, Math.min(200, heli.vy + accel * dt));
+  heli.y += heli.vy * dt;
+  heli.rotorPhase += (thrust ? 22 : 14) * dt * Math.PI * 2;
+
+  // Smoke trail -- spawn with negative vx matching scroll so particles stay cave-relative
+  if (Math.random() < 0.6) {
+    const ex = heli.x - HELI_W + 2;
+    const ey = heli.y + 1;
+    spawnParticles(ex, ey, 1, biome.smoke, 14, 1.1, 2, -speed);
+  }
+  // Heavier damage smoke puffs
+  if (Math.random() < 0.12) {
+    spawnParticles(heli.x - HELI_W + 2, heli.y, 3, '#444444', 10, 0.8, 2, -speed);
+  }
+
+  updateParticles(dt);
+
+  // Collision: hitbox derived from the drawn sprite, inset for forgiveness
+  const hb    = heliHitbox();
+  const hTop  = hb.top;
+  const hBot  = hb.bottom;
+  const hLeft = hb.left;
+  const hRight= hb.right;
+
+  if (hTop < 0 || hBot > PX_H) { die(); return; }
+
+  // Collision: terrain columns spanned by the hitbox
+  const colStart = Math.floor((hLeft + scrollOffset) / TERRAIN_STEP);
+  const colEnd   = Math.floor((hRight + scrollOffset) / TERRAIN_STEP);
+  for (let i = colStart; i <= colEnd; i++) {
+    const ci = Math.min(Math.max(i, 0), terrainCols.length - 1);
+    const col = terrainCols[ci];
+    if (hTop < col.ceil || hBot > col.floor) { die(); return; }
+  }
+
+  // Collision: hanging rocks
+  for (const r of rocks) {
+    if (hRight > r.worldX && hLeft < r.worldX + r.w &&
+        hBot  > r.y        && hTop  < r.y + r.h) {
+      die(); return;
+    }
+  }
+}
+
+function die() {
+  spawnParticles(heli.x, heli.y, 20, '#ff8800', 50, 0.9, 2);
+  spawnParticles(heli.x, heli.y, 12, '#ffdd00', 30, 0.6, 1);
+  spawnParticles(heli.x, heli.y, 8,  '#ff2222', 60, 1.1, 2);
+  if (dist > best) best = dist;
+  awaitingRelease = true;
+  state = S.DEAD;
+}
+
+function renderPlay() {
+  // Background
+  pxCtx.fillStyle = palette[biome.bg];
+  pxCtx.fillRect(0, 0, PX_W, PX_H);
+
+  // Terrain
+  drawTerrain();
+
+  // Hanging rocks
+  drawRocks();
+
+  // Particles behind heli
+  renderParticles();
+
+  // Helicopter
+  const sr = heliSpriteRect();
+  const hx = sr.x;
+  const hy = sr.y;
+  drawSpriteScaled(SPR_HELI, palette, hx, hy, HELI_SCALE);
+
+  // Rotor (animated bar above heli)
+  const rx = Math.round(heli.x - HELI_W * 0.5);
+  const ry = hy - Math.round(2 * HELI_SCALE);
+  const rw = Math.round((12 + Math.sin(heli.rotorPhase) * 10) * HELI_SCALE);
+  pxCtx.fillStyle = palette[5];
+  pxCtx.fillRect(rx - rw / 2, ry, rw, 1);
+
+  // HUD
+  pxCtx.font = 'bold 8px monospace';
+  pxCtx.fillStyle = palette[15] || '#ffffff';
+  pxCtx.textAlign = 'left';
+  pxCtx.fillText(biome.name, 4, 9);
+  pxCtx.textAlign = 'right';
+  pxCtx.fillText(Math.floor(dist) + 'm', PX_W - 4, 9);
+}
+
+function drawTerrain() {
+  const rd = palette[biome.rd];
+  const rl = palette[biome.rl];
+  const acc = palette[biome.acc];
+
+  const ox = -Math.round(scrollOffset); // pixel offset for smooth scroll
+
+  for (let i = 0; i < terrainCols.length; i++) {
+    const col = terrainCols[i];
+    const x   = ox + i * TERRAIN_STEP;
+    if (x + TERRAIN_STEP < 0 || x > PX_W) continue;
+
+    // Ceiling rock
+    pxCtx.fillStyle = rd;
+    pxCtx.fillRect(x, 0, TERRAIN_STEP, col.ceil);
+    // Ceiling highlight edge
+    pxCtx.fillStyle = rl;
+    pxCtx.fillRect(x, col.ceil - 2, TERRAIN_STEP, 2);
+    // Accent pixel detail (stalactites / texture)
+    if ((i % 5) === 0 && col.ceil > 6) {
+      pxCtx.fillStyle = acc;
+      pxCtx.fillRect(x, col.ceil - 4, 2, 3);
+    }
+
+    // Floor rock
+    pxCtx.fillStyle = rd;
+    pxCtx.fillRect(x, col.floor, TERRAIN_STEP, PX_H - col.floor);
+    // Floor highlight edge
+    pxCtx.fillStyle = rl;
+    pxCtx.fillRect(x, col.floor, TERRAIN_STEP, 2);
+    // Accent pixel detail (stalagmites / texture)
+    if ((i % 7) === 0 && (PX_H - col.floor) > 6) {
+      pxCtx.fillStyle = acc;
+      pxCtx.fillRect(x + 1, col.floor + 1, 2, 3);
+    }
+  }
+}
+
+function drawRocks() {
+  const rd  = palette[biome.rd];
+  const rl  = palette[biome.rl];
+  const acc = palette[biome.acc];
+  for (const r of rocks) {
+    const rx = Math.round(r.worldX);
+    if (rx + r.w < 0 || rx > PX_W) continue;
+    // Body
+    pxCtx.fillStyle = rd;
+    pxCtx.fillRect(rx, r.y, r.w, r.h);
+    // Top highlight edge (matches ceiling convention)
+    pxCtx.fillStyle = rl;
+    pxCtx.fillRect(rx, r.y, r.w, 1);
+    // Accent pixel
+    pxCtx.fillStyle = acc;
+    pxCtx.fillRect(rx + 1, r.y + 1, 2, 1);
+  }
+}
+
+// --- DEAD ---
+function updateDead(dt) {
+  updateParticles(dt);
+  if (awaitingRelease) {
+    if (!thrust && !touch.down) awaitingRelease = false;
+    return;
+  }
+  if (thrust || touch.down) startGame();
+}
+
+function renderDead() {
+  pxCtx.fillStyle = palette[biome.bg];
+  pxCtx.fillRect(0, 0, PX_W, PX_H);
+  drawTerrain();
+  drawRocks();
+  renderParticles();
+  drawOverlay(
+    'CRASHED',
+    Math.floor(dist) + 'm    BEST ' + Math.floor(best) + 'm',
+    'HOLD TO RETRY'
+  );
+}
+
+// --- Overlay ---
+function drawOverlay(title, subtitle, cta) {
+  pxCtx.fillStyle = '#000';
+  pxCtx.fillRect(16, PX_H/2 - 36, PX_W - 32, 72);
+  pxCtx.fillStyle = '#fff';
+  pxCtx.fillRect(16,        PX_H/2 - 36, PX_W - 32, 1);
+  pxCtx.fillRect(16,        PX_H/2 + 35, PX_W - 32, 1);
+  pxCtx.fillRect(16,        PX_H/2 - 36, 1, 72);
+  pxCtx.fillRect(PX_W - 17, PX_H/2 - 36, 1, 72);
+
+  pxCtx.textAlign = 'center';
+  pxCtx.font = 'bold 10px monospace';
+  pxCtx.fillStyle = '#fff';
+  pxCtx.fillText(title, PX_W/2, PX_H/2 - 16);
+
+  if (subtitle) {
+    pxCtx.font = '7px monospace';
+    pxCtx.fillStyle = '#aaa';
+    pxCtx.fillText(subtitle, PX_W/2, PX_H/2 + 2);
+  }
+  if (cta) {
+    pxCtx.font = '7px monospace';
+    pxCtx.fillStyle = '#ff0';
+    pxCtx.fillText(cta, PX_W/2, PX_H/2 + 20);
+  }
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

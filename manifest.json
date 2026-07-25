@@ -1,0 +1,41 @@
+{
+  "name": "Game Showcase",
+  "short_name": "Arcade",
+  "description": "Classic browser games - Play Pong, Snake, Pac-Man, and more on your phone",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#1a1a1a",
+  "theme_color": "#4facfe",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Pong",
+      "short_name": "Pong",
+      "description": "Classic Pong game",
+      "url": "./pong/",
+      "icons": [{ "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect fill='%23667eea' width='96' height='96'/><text x='48' y='60' font-size='32' text-anchor='middle' fill='white'>🏓</text></svg>", "sizes": "96x96" }]
+    },
+    {
+      "name": "Snake",
+      "short_name": "Snake",
+      "description": "Classic Snake game",
+      "url": "./snake/",
+      "icons": [{ "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect fill='%2343e97b' width='96' height='96'/><text x='48' y='60' font-size='32' text-anchor='middle' fill='white'>🐍</text></svg>", "sizes": "96x96" }]
+    },
+    {
+      "name": "Pac-Man",
+      "short_name": "Pac-Man",
+      "description": "Classic Pac-Man game",
+      "url": "./pacman/",
+      "icons": [{ "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect fill='%23fa709a' width='96' height='96'/><text x='48' y='60' font-size='32' text-anchor='middle' fill='white'>👾</text></svg>", "sizes": "96x96" }]
+    }
+  ],
+  "categories": ["games"]
+}

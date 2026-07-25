@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="Browser Game Showcase - Play classic games in your browser">
+    <meta name="theme-color" content="#1a1a1a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Arcade">
+    <title>Game Showcase</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%231a1a1a' width='192' height='192'/><rect fill='%23ff6b6b' x='24' y='48' width='24' height='24'/><rect fill='%234ecdc4' x='60' y='48' width='24' height='24'/><rect fill='%2345b7d1' x='96' y='48' width='24' height='24'/><rect fill='%23f9ca24' x='132' y='48' width='24' height='24'/><rect fill='%236c5ce7' x='24' y='84' width='24' height='24'/><rect fill='%23a29bfe' x='60' y='84' width='24' height='24'/><rect fill='%2300b894' x='96' y='84' width='24' height='24'/><rect fill='%23fd79a8' x='132' y='84' width='24' height='24'/></svg>">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            color: #fff;
+            min-height: 100vh;
+            /* black-translucent status bar draws under the notch when installed */
+            padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+                     calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 32px;
+            padding-top: 16px;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: #aaa;
+        }
+
+        .games-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 12px;
+            margin-bottom: 32px;
+        }
+
+        @media (min-width: 600px) {
+            .games-grid {
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 16px;
+            }
+        }
+
+        .game-card {
+            aspect-ratio: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            padding: 16px;
+            text-decoration: none;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            text-align: center;
+            cursor: pointer;
+            border: none;
+            transition: transform 0.2s, box-shadow 0.2s;
+            background-size: 120%;
+            background-position: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .game-card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.3);
+            z-index: 1;
+        }
+
+        .game-card > * {
+            position: relative;
+            z-index: 2;
+        }
+
+        .game-card:active {
+            transform: scale(0.95);
+        }
+
+        .game-icon {
+            font-size: 32px;
+            margin-bottom: 8px;
+            display: block;
+        }
+
+        .game-name {
+            display: block;
+        }
+
+        /* Game-specific colors */
+        .card-pong { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .card-ufo { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+        .card-chopper { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+        .card-snake { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+        .card-pacman { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+        .card-racer { background: linear-gradient(135deg, #30cfd0 0%, #330867 100%); }
+        .card-solitaire { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); color: #333; }
+        .card-wolf { background: linear-gradient(135deg, #ff9a56 0%, #ff6a88 100%); }
+        .card-tilt { background: linear-gradient(135deg, #ffd89b 0%, #19547b 100%); }
+
+        footer {
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+            padding: 16px;
+            border-top: 1px solid #333;
+            margin-top: 32px;
+        }
+
+        .install-prompt {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            display: none;
+        }
+
+        .install-prompt.show {
+            display: block;
+        }
+
+        .install-btn {
+            background: #4facfe;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 8px;
+            width: 100%;
+        }
+
+        .install-btn:active {
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🎮 Game Showcase</h1>
+        <p class="subtitle">Classic browser games, now playable on your phone</p>
+    </header>
+
+    <div class="install-prompt" id="installPrompt">
+        <strong>Install to your home screen</strong>
+        <p style="font-size: 12px; margin-top: 4px;">Play these games offline, anytime.</p>
+        <button class="install-btn" id="installBtn">Add to Home Screen</button>
+    </div>
+
+    <div class="games-grid" id="gamesGrid">
+        <a href="pong/index.html" class="game-card card-pong">
+            <span class="game-icon">🏓</span>
+            <span class="game-name">Pong</span>
+        </a>
+        <a href="ufo-dash/index.html" class="game-card card-ufo">
+            <span class="game-icon">🛸</span>
+            <span class="game-name">UFO Dash</span>
+        </a>
+        <a href="chopper/index.html" class="game-card card-chopper">
+            <span class="game-icon">🚁</span>
+            <span class="game-name">Chopper</span>
+        </a>
+        <a href="snake/index.html" class="game-card card-snake">
+            <span class="game-icon">🐍</span>
+            <span class="game-name">Snake</span>
+        </a>
+        <a href="pacman/index.html" class="game-card card-pacman">
+            <span class="game-icon">👾</span>
+            <span class="game-name">Pac-Man</span>
+        </a>
+        <a href="racer/index.html" class="game-card card-racer">
+            <span class="game-icon">🏎️</span>
+            <span class="game-name">Racer</span>
+        </a>
+        <a href="solitaire/index.html" class="game-card card-solitaire">
+            <span class="game-icon">🂠</span>
+            <span class="game-name">Solitaire</span>
+        </a>
+        <a href="wolf/index.html" class="game-card card-wolf">
+            <span class="game-icon">🐺</span>
+            <span class="game-name">Wolf</span>
+        </a>
+        <a href="tilt/index.html" class="game-card card-tilt">
+            <span class="game-icon">🎯</span>
+            <span class="game-name">Tilt</span>
+        </a>
+    </div>
+
+    <footer>
+        <p>Made with ❤️ for mobile</p>
+    </footer>
+
+    <script>
+        // Register service worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('service-worker.js')
+                .then(reg => console.log('Service worker registered'))
+                .catch(err => console.log('Service worker registration failed:', err));
+        }
+
+        // PWA install prompt
+        let deferredPrompt;
+        const installPrompt = document.getElementById('installPrompt');
+        const installBtn = document.getElementById('installBtn');
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            installPrompt.classList.add('show');
+        });
+
+        installBtn.addEventListener('click', async () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                console.log(`User response: ${outcome}`);
+                installPrompt.classList.remove('show');
+                deferredPrompt = null;
+            }
+        });
+
+        window.addEventListener('appinstalled', () => {
+            console.log('PWA installed');
+            installPrompt.classList.remove('show');
+        });
+    </script>
+</body>
+</html>

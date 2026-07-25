@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>SNAKE</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; align-items: center;
+         justify-content: center; height: 100vh; overflow: hidden; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges;
+           touch-action: none; }
+  .menu-btn { position: fixed; top: 12px; right: 12px; z-index: 1000; padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: #fff; cursor: pointer; font-size: 12px; border-radius: 4px; font-family: monospace; }
+  .menu-btn:active { background: rgba(255,255,255,0.2); }
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+// --- Logical resolution ---
+const PX_W = 320;
+const PX_H = Math.round(PX_W * (window.innerHeight / window.innerWidth));
+let SCALE  = 1;
+
+const px    = document.createElement('canvas');
+const pxCtx = px.getContext('2d');
+px.width    = PX_W;
+px.height   = PX_H;
+pxCtx.imageSmoothingEnabled = false;
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const DPR    = window.devicePixelRatio || 1;
+
+function resize() {
+  SCALE = Math.max(1, Math.floor(window.innerWidth / PX_W));
+  canvas.width  = PX_W * SCALE * DPR;
+  canvas.height = PX_H * SCALE * DPR;
+  canvas.style.width  = (PX_W * SCALE) + 'px';
+  canvas.style.height = (PX_H * SCALE) + 'px';
+  ctx.scale(DPR, DPR);
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Palette (EARTH) ---
+const PAL = {
+  EARTH: [
+    '#0d0d0d', // 0
+    '#1a1a2e', // 1
+    '#2d4a1e', // 2 dark green (grass shadow)
+    '#4a7c3f', // 3 mid green (grass)
+    '#7ab648', // 4 bright green (snake body)
+    '#c8e86b', // 5 highlight green (snake head)
+    '#8b5e3c', // 6 brown
+    '#c49a5a', // 7 sand
+    '#f0d080', // 8 pale sand
+    '#3a1f0d', // 9 dark earth (border)
+    '#e84040', // 10 red (apple)
+    '#f8a030', // 11 orange
+    '#f8f8c0', // 12 near white
+    '#6888b0', // 13 sky blue
+    '#a8d8f0', // 14 light sky
+    '#ffffff', // 15 white
+  ],
+};
+const palette = PAL.EARTH;
+
+// --- Grid setup ---
+const CELL    = 16;                                 // logical px per grid cell
+const HUD_H   = 14;                                 // top HUD strip
+const PLAY_H  = PX_H - HUD_H;
+const GRID_W  = Math.floor(PX_W / CELL);
+const GRID_H  = Math.floor(PLAY_H / CELL);
+const PLAY_X  = Math.floor((PX_W - GRID_W * CELL) / 2);
+const PLAY_Y  = HUD_H + Math.floor((PLAY_H - GRID_H * CELL) / 2);
+
+// --- State ---
+const S = { MENU: 0, PLAY: 1, DEAD: 2 };
+let state = S.MENU;
+
+// --- Input ---
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+    e.preventDefault();
+  }
+  // Direction queue
+  if (state === S.PLAY) {
+    if      (e.code === 'ArrowUp'    || e.code === 'KeyW') queueDir(0, -1);
+    else if (e.code === 'ArrowDown'  || e.code === 'KeyS') queueDir(0,  1);
+    else if (e.code === 'ArrowLeft'  || e.code === 'KeyA') queueDir(-1, 0);
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') queueDir(1,  0);
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Touch: swipe to set direction
+let touchStart = null;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  touchStart = { x: t.clientX, y: t.clientY };
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!touchStart) return;
+  const t  = e.touches[0];
+  const dx = t.clientX - touchStart.x;
+  const dy = t.clientY - touchStart.y;
+  const minSwipe = 20;
+  if (Math.abs(dx) < minSwipe && Math.abs(dy) < minSwipe) return;
+  if (Math.abs(dx) > Math.abs(dy)) queueDir(dx > 0 ? 1 : -1, 0);
+  else                              queueDir(0, dy > 0 ? 1 : -1);
+  touchStart = { x: t.clientX, y: t.clientY }; // reset so subsequent swipes work
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  // Tap (no swipe registered) used for menu / restart
+  touchStart = null;
+  if (state === S.MENU) startGame();
+  else if (state === S.DEAD && !awaitingRelease) startGame();
+}, { passive: false });
+
+// --- Game state ---
+let snake;            // array of {x,y} grid cells, head at index 0
+let dir     = { dx: 1, dy: 0 };  // initialised so menu render works before startGame
+let nextDir = { dx: 1, dy: 0 };
+let apple   = { x: 0, y: 0 };
+let score   = 0;
+let best    = 0;
+let tickInterval;     // seconds per move
+let tickAccum;        // accumulator
+let awaitingRelease = false;
+
+// Particle system
+const particles = [];
+function spawnParticles(x, y, count, color, spd, life, size) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const v = (0.5 + Math.random() * 0.5) * spd;
+    particles.push({ x, y, vx: Math.cos(a)*v, vy: Math.sin(a)*v,
+                     life, maxLife: life, size, color });
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function renderParticles() {
+  for (const p of particles) {
+    if (p.life / p.maxLife < 0.15) continue;
+    pxCtx.fillStyle = p.color;
+    pxCtx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size);
+  }
+}
+
+// --- Game logic ---
+function queueDir(dx, dy) {
+  // Reject 180-degree reversal vs current direction
+  if (dx === -dir.dx && dy === -dir.dy) return;
+  // Reject same direction
+  if (dx ===  dir.dx && dy ===  dir.dy) return;
+  nextDir = { dx, dy };
+}
+
+function placeApple() {
+  // Find an unoccupied cell. With small grid the rejection sample is fine.
+  while (true) {
+    const x = Math.floor(Math.random() * GRID_W);
+    const y = Math.floor(Math.random() * GRID_H);
+    if (!snake.some(s => s.x === x && s.y === y)) {
+      apple = { x, y };
+      return;
+    }
+  }
+}
+
+function startGame() {
+  const cx = Math.floor(GRID_W / 2);
+  const cy = Math.floor(GRID_H / 2);
+  snake = [
+    { x: cx,     y: cy },
+    { x: cx - 1, y: cy },
+    { x: cx - 2, y: cy },
+  ];
+  dir = { dx: 1, dy: 0 };
+  nextDir = { dx: 1, dy: 0 };
+  score = 0;
+  tickInterval = 0.18;
+  tickAccum = 0;
+  particles.length = 0;
+  awaitingRelease = false;
+  placeApple();
+  state = S.PLAY;
+}
+
+function tick() {
+  // Apply queued direction at tick boundary (prevents diagonal teleport)
+  dir = nextDir;
+
+  const head = snake[0];
+  const nx = head.x + dir.dx;
+  const ny = head.y + dir.dy;
+
+  // Wall collision
+  if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) { die(); return; }
+
+  // Self collision (allow moving into the tail tile since it will vacate -- but
+  // only if not eating, since eating extends and the tail does not move)
+  const willEat = (nx === apple.x && ny === apple.y);
+  for (let i = 0; i < snake.length - (willEat ? 0 : 1); i++) {
+    if (snake[i].x === nx && snake[i].y === ny) { die(); return; }
+  }
+
+  // Move
+  snake.unshift({ x: nx, y: ny });
+  if (willEat) {
+    score++;
+    // Slight speedup, capped
+    tickInterval = Math.max(0.06, tickInterval * 0.96);
+    // Apple particles in cell-centre coords
+    const cx = PLAY_X + apple.x * CELL + CELL / 2;
+    const cy = PLAY_Y + apple.y * CELL + CELL / 2;
+    spawnParticles(cx, cy, 10, palette[10], 60, 0.5, 1);
+    spawnParticles(cx, cy, 6,  palette[5],  40, 0.4, 1);
+    placeApple();
+  } else {
+    snake.pop();
+  }
+}
+
+function die() {
+  const head = snake[0];
+  const cx = PLAY_X + head.x * CELL + CELL / 2;
+  const cy = PLAY_Y + head.y * CELL + CELL / 2;
+  spawnParticles(cx, cy, 16, palette[10], 80, 0.7, 2);
+  spawnParticles(cx, cy, 10, palette[4],  60, 0.5, 1);
+  if (score > best) best = score;
+  awaitingRelease = true;
+  state = S.DEAD;
+}
+
+// --- Loop ---
+let lastT = 0;
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0);
+  lastT = t;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  switch (state) {
+    case S.MENU: updateMenu(dt); break;
+    case S.PLAY: updatePlay(dt); break;
+    case S.DEAD: updateDead(dt); break;
+  }
+}
+
+function render() {
+  pxCtx.clearRect(0, 0, PX_W, PX_H);
+  switch (state) {
+    case S.MENU: renderMenu(); break;
+    case S.PLAY: renderPlay(); break;
+    case S.DEAD: renderDead(); break;
+  }
+  ctx.clearRect(0, 0, PX_W * SCALE, PX_H * SCALE);
+  ctx.drawImage(px, 0, 0, PX_W * SCALE, PX_H * SCALE);
+}
+
+// --- MENU ---
+function updateMenu(dt) {
+  if (keys['Space'] || keys['Enter']) { keys['Space'] = false; startGame(); }
+}
+
+function renderMenu() {
+  drawField();
+  drawHUD();
+  // Demo snake
+  const dy = Math.floor(GRID_H / 2);
+  const demo = [{x:6,y:dy},{x:5,y:dy},{x:4,y:dy},{x:3,y:dy}];
+  drawSnake(demo);
+  drawApple({ x: 10, y: dy });
+  drawOverlay('SNAKE', 'ARROWS / WASD / SWIPE', 'PRESS SPACE / TAP TO START');
+}
+
+// --- PLAY ---
+function updatePlay(dt) {
+  tickAccum += dt;
+  while (tickAccum >= tickInterval) {
+    tickAccum -= tickInterval;
+    tick();
+    if (state !== S.PLAY) break;
+  }
+  updateParticles(dt);
+}
+
+function renderPlay() {
+  drawField();
+  drawApple(apple);
+  drawSnake(snake);
+  renderParticles();
+  drawHUD();
+}
+
+// --- DEAD ---
+function updateDead(dt) {
+  updateParticles(dt);
+  if (awaitingRelease) {
+    if (!keys['Space'] && !keys['Enter'] && touchStart === null) awaitingRelease = false;
+    return;
+  }
+  if (keys['Space'] || keys['Enter']) startGame();
+}
+
+function renderDead() {
+  drawField();
+  drawApple(apple);
+  drawSnake(snake);
+  renderParticles();
+  drawHUD();
+  drawOverlay('GAME OVER', 'SCORE ' + score + '   BEST ' + best, 'SPACE / TAP TO RETRY');
+}
+
+// --- Drawing ---
+function drawField() {
+  // HUD strip background
+  pxCtx.fillStyle = palette[1];
+  pxCtx.fillRect(0, 0, PX_W, HUD_H);
+  pxCtx.fillStyle = palette[9];
+  pxCtx.fillRect(0, HUD_H - 1, PX_W, 1);
+
+  // Play field background -- two-tone grass checker
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      pxCtx.fillStyle = ((x + y) & 1) ? palette[3] : palette[2];
+      pxCtx.fillRect(PLAY_X + x*CELL, PLAY_Y + y*CELL, CELL, CELL);
+    }
+  }
+
+  // Field border
+  pxCtx.fillStyle = palette[9];
+  pxCtx.fillRect(PLAY_X - 1,             PLAY_Y - 1,             GRID_W*CELL + 2, 1);
+  pxCtx.fillRect(PLAY_X - 1,             PLAY_Y + GRID_H*CELL,   GRID_W*CELL + 2, 1);
+  pxCtx.fillRect(PLAY_X - 1,             PLAY_Y - 1,             1, GRID_H*CELL + 2);
+  pxCtx.fillRect(PLAY_X + GRID_W*CELL,   PLAY_Y - 1,             1, GRID_H*CELL + 2);
+}
+
+function drawApple(a) {
+  const x = PLAY_X + a.x*CELL;
+  const y = PLAY_Y + a.y*CELL;
+  // Body -- 10x9 oval-ish, inset for grass border
+  pxCtx.fillStyle = palette[10];
+  pxCtx.fillRect(x + 3, y + 5, 10, 9);
+  pxCtx.fillRect(x + 4, y + 4, 8,  1);
+  pxCtx.fillRect(x + 4, y + 14, 8, 1);
+  // Body shadow on right side
+  pxCtx.fillStyle = palette[9];
+  pxCtx.fillRect(x + 11, y + 6, 2, 7);
+  pxCtx.fillRect(x + 10, y + 13, 3, 1);
+  // Highlight on upper left
+  pxCtx.fillStyle = palette[12];
+  pxCtx.fillRect(x + 5, y + 6, 2, 1);
+  pxCtx.fillRect(x + 4, y + 7, 1, 2);
+  // Stalk
+  pxCtx.fillStyle = palette[6];
+  pxCtx.fillRect(x + 8, y + 2, 1, 3);
+  // Leaf
+  pxCtx.fillStyle = palette[4];
+  pxCtx.fillRect(x + 9, y + 2, 3, 1);
+  pxCtx.fillRect(x + 9, y + 3, 2, 1);
+}
+
+function drawSnake(s) {
+  for (let i = 0; i < s.length; i++) {
+    const seg = s[i];
+    const x = PLAY_X + seg.x*CELL;
+    const y = PLAY_Y + seg.y*CELL;
+    const isHead = (i === 0);
+
+    // Body fill -- inset 2px from grass for a clear gap between segments
+    pxCtx.fillStyle = isHead ? palette[5] : palette[4];
+    pxCtx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4);
+
+    // Highlight band on top-left for shape
+    pxCtx.fillStyle = isHead ? palette[12] : palette[5];
+    pxCtx.fillRect(x + 3, y + 3, CELL - 6, 1);
+    pxCtx.fillRect(x + 3, y + 3, 1, CELL - 6);
+
+    // Shadow band on bottom-right
+    pxCtx.fillStyle = palette[2];
+    pxCtx.fillRect(x + 3,        y + CELL - 4, CELL - 6, 1);
+    pxCtx.fillRect(x + CELL - 4, y + 3,        1,        CELL - 6);
+
+    // Head detail: two eyes oriented to direction of travel
+    if (isHead) {
+      pxCtx.fillStyle = palette[12];
+      let e1x, e1y, e2x, e2y;
+      if (dir.dx === 1) {
+        e1x = x + CELL - 6; e1y = y + 4;
+        e2x = x + CELL - 6; e2y = y + CELL - 6;
+      } else if (dir.dx === -1) {
+        e1x = x + 4;        e1y = y + 4;
+        e2x = x + 4;        e2y = y + CELL - 6;
+      } else if (dir.dy === -1) {
+        e1x = x + 4;        e1y = y + 4;
+        e2x = x + CELL - 6; e2y = y + 4;
+      } else {
+        e1x = x + 4;        e1y = y + CELL - 6;
+        e2x = x + CELL - 6; e2y = y + CELL - 6;
+      }
+      pxCtx.fillRect(e1x, e1y, 2, 2);
+      pxCtx.fillRect(e2x, e2y, 2, 2);
+      // Pupils
+      pxCtx.fillStyle = palette[0];
+      pxCtx.fillRect(e1x + (dir.dx > 0 ? 1 : 0), e1y + (dir.dy > 0 ? 1 : 0), 1, 1);
+      pxCtx.fillRect(e2x + (dir.dx > 0 ? 1 : 0), e2y + (dir.dy > 0 ? 1 : 0), 1, 1);
+    }
+  }
+}
+
+function drawHUD() {
+  pxCtx.font = 'bold 8px monospace';
+  pxCtx.fillStyle = palette[15];
+  pxCtx.textAlign = 'left';
+  pxCtx.fillText('SCORE ' + (score|0), 4, 9);
+  pxCtx.textAlign = 'right';
+  pxCtx.fillText('BEST ' + best, PX_W - 4, 9);
+  pxCtx.textAlign = 'center';
+}
+
+// --- Overlay ---
+function drawOverlay(title, subtitle, cta) {
+  pxCtx.fillStyle = '#000';
+  pxCtx.fillRect(20, PX_H/2 - 40, PX_W - 40, 80);
+  pxCtx.fillStyle = '#fff';
+  pxCtx.fillRect(20,        PX_H/2 - 40, PX_W - 40, 1);
+  pxCtx.fillRect(20,        PX_H/2 + 39, PX_W - 40, 1);
+  pxCtx.fillRect(20,        PX_H/2 - 40, 1, 80);
+  pxCtx.fillRect(PX_W - 21, PX_H/2 - 40, 1, 80);
+
+  pxCtx.textAlign = 'center';
+  pxCtx.font = 'bold 10px monospace';
+  pxCtx.fillStyle = '#fff';
+  pxCtx.fillText(title, PX_W/2, PX_H/2 - 18);
+
+  if (subtitle) {
+    pxCtx.font = '7px monospace';
+    pxCtx.fillStyle = '#aaa';
+    pxCtx.fillText(subtitle, PX_W/2, PX_H/2);
+  }
+  if (cta) {
+    pxCtx.font = '7px monospace';
+    pxCtx.fillStyle = '#ff0';
+    pxCtx.fillText(cta, PX_W/2, PX_H/2 + 18);
+  }
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

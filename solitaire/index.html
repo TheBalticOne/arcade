@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>SOLITAIRE</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges;
+           touch-action: none; }
+  @media (orientation: portrait) {
+    canvas { transform: rotate(90deg); transform-origin: center center; }
+  }
+  .menu-btn { position: fixed; top: 12px; right: 12px; z-index: 1000; padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: #fff; cursor: pointer; font-size: 12px; border-radius: 4px; font-family: monospace; }
+  .menu-btn:active { background: rgba(255,255,255,0.2); }
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+const PX_W = 480;
+let PX_H, SCALE;
+
+const px    = document.createElement('canvas');
+const pxCtx = px.getContext('2d');
+pxCtx.imageSmoothingEnabled = false;
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const DPR    = window.devicePixelRatio || 1;
+
+function isPortrait() {
+  return window.innerHeight > window.innerWidth;
+}
+
+function resize() {
+  const longEdge  = Math.max(window.innerWidth, window.innerHeight);
+  const shortEdge = Math.min(window.innerWidth, window.innerHeight);
+  PX_H = Math.round(PX_W * (shortEdge / longEdge));
+  SCALE = Math.max(1, Math.floor(longEdge / PX_W));
+
+  px.width  = PX_W;
+  px.height = PX_H;
+  pxCtx.imageSmoothingEnabled = false;
+
+  canvas.width  = PX_W * SCALE * DPR;
+  canvas.height = PX_H * SCALE * DPR;
+
+  if (isPortrait()) {
+    canvas.style.width  = (PX_W * SCALE) + 'px';
+    canvas.style.height = (PX_H * SCALE) + 'px';
+  } else {
+    canvas.style.width  = (PX_W * SCALE) + 'px';
+    canvas.style.height = (PX_H * SCALE) + 'px';
+  }
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(DPR, DPR);
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', resize);
+resize();
+
+const COL = {
+  felt:        '#0a4d2c',
+  feltDark:    '#073a20',
+  feltLite:    '#0e6238',
+  cardFace:    '#f8f4e6',
+  cardEdge:    '#1a1a1a',
+  cardShadow:  '#062014',
+  cardBackA:   '#3a78b8',
+  cardBackB:   '#1c4878',
+  cardBackHi:  '#88bbe0',
+  red:         '#c83020',
+  black:       '#1a1a1a',
+  gold:        '#e8c040',
+  goldDark:    '#a07820',
+  hudBg:       '#062014',
+  hudText:     '#f8f4e6',
+  highlight:   '#ffdd60',
+  empty:       '#062014',
+  emptyEdge:   '#0a3a22',
+};
+
+const SUITS = ['♠', '♥', '♦', '♣'];
+const SUIT_RED = { '♥': true, '♦': true };
+const RANKS = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+function rankVal(r) { return RANKS.indexOf(r) + 1; }
+
+function makeDeck() {
+  const d = [];
+  for (const s of SUITS) for (const r of RANKS) d.push({ suit: s, rank: r, faceUp: false });
+  return d;
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+const CARD_W   = 52;
+const CARD_H   = 72;
+const TAB_GAP  = 8;
+const TAB_FAN_FACEDOWN = 6;
+const TAB_FAN_FACEUP   = 16;
+
+let TOP_Y, TAB_Y;
+let STOCK_X, WASTE_X, FOUND_X;
+let TAB_X = [];
+
+function computeLayout() {
+  TOP_Y = 14;
+  TAB_Y = TOP_Y + CARD_H + 12;
+  const tabTotal = 7 * CARD_W + 6 * TAB_GAP;
+  const tabStart = Math.floor((PX_W - tabTotal) / 2);
+  TAB_X = [];
+  for (let i = 0; i < 7; i++) TAB_X.push(tabStart + i * (CARD_W + TAB_GAP));
+
+  STOCK_X = TAB_X[0];
+  WASTE_X = TAB_X[1];
+  FOUND_X = [TAB_X[3], TAB_X[4], TAB_X[5], TAB_X[6]];
+}
+
+const S = { MENU: 0, PLAY: 1, WIN: 2 };
+let state = S.MENU;
+
+let stock, waste, foundations, tableau;
+let selection = null;
+let moves = 0;
+let bestMoves = 0;
+let winAnimTimer = 0;
+
+let flashTimer = 0;
+let flashRect  = null;
+
+function fanOffsets(pile) {
+  const n = pile.length;
+  const offsets = new Array(n);
+  if (n === 0) return offsets;
+
+  const available = PX_H - TAB_Y - CARD_H - 2;
+
+  let totalAtFull = 0;
+  for (let i = 0; i < n; i++) {
+    if (i === 0) { offsets[i] = 0; continue; }
+    const prev = pile[i-1];
+    const step = prev.faceUp ? TAB_FAN_FACEUP : TAB_FAN_FACEDOWN;
+    offsets[i] = offsets[i-1] + step;
+    totalAtFull = offsets[i];
+  }
+
+  if (totalAtFull <= available) return offsets;
+
+  let faceDownSteps = 0;
+  let faceUpSteps   = 0;
+  for (let i = 1; i < n; i++) {
+    if (pile[i-1].faceUp) faceUpSteps++;
+    else                  faceDownSteps++;
+  }
+  const fixedDown = faceDownSteps * TAB_FAN_FACEDOWN;
+  const remaining = available - fixedDown;
+  const compressedFaceUp = faceUpSteps > 0
+    ? Math.max(3, Math.floor(remaining / faceUpSteps))
+    : 0;
+
+  for (let i = 0; i < n; i++) {
+    if (i === 0) { offsets[i] = 0; continue; }
+    const prev = pile[i-1];
+    const step = prev.faceUp ? compressedFaceUp : TAB_FAN_FACEDOWN;
+    offsets[i] = offsets[i-1] + step;
+  }
+  return offsets;
+}
+
+function newDeal() {
+  computeLayout();
+  const deck = makeDeck();
+  shuffle(deck);
+
+  tableau = [[],[],[],[],[],[],[]];
+  for (let col = 0; col < 7; col++) {
+    for (let row = 0; row <= col; row++) {
+      const card = deck.pop();
+      card.faceUp = (row === col);
+      tableau[col].push(card);
+    }
+  }
+  stock = deck;
+  for (const c of stock) c.faceUp = false;
+  waste = [];
+  foundations = [[], [], [], []];
+  selection = null;
+  moves = 0;
+  flashTimer = 0;
+  winAnimTimer = 0;
+  state = S.PLAY;
+}
+
+function startMenu() {
+  computeLayout();
+  state = S.MENU;
+}
+
+function pileTopRect(type, idx) {
+  if (type === 'stock')      return { x: STOCK_X, y: TOP_Y, w: CARD_W, h: CARD_H };
+  if (type === 'waste')      return { x: WASTE_X, y: TOP_Y, w: CARD_W, h: CARD_H };
+  if (type === 'foundation') return { x: FOUND_X[idx], y: TOP_Y, w: CARD_W, h: CARD_H };
+  return null;
+}
+
+function tableauCardRect(col, row) {
+  const pile = tableau[col];
+  const offs = fanOffsets(pile);
+  return { x: TAB_X[col], y: TAB_Y + (offs[row] || 0), w: CARD_W, h: CARD_H };
+}
+
+function hitTest(lx, ly) {
+  let r = pileTopRect('stock');
+  if (lx >= r.x && lx < r.x + r.w && ly >= r.y && ly < r.y + r.h) {
+    return { type: 'stock', idx: 0, cardIdx: stock.length - 1 };
+  }
+  r = pileTopRect('waste');
+  if (lx >= r.x && lx < r.x + r.w && ly >= r.y && ly < r.y + r.h) {
+    return { type: 'waste', idx: 0, cardIdx: waste.length - 1 };
+  }
+  for (let i = 0; i < 4; i++) {
+    r = pileTopRect('foundation', i);
+    if (lx >= r.x && lx < r.x + r.w && ly >= r.y && ly < r.y + r.h) {
+      return { type: 'foundation', idx: i, cardIdx: foundations[i].length - 1 };
+    }
+  }
+  for (let col = 0; col < 7; col++) {
+    const pile = tableau[col];
+    if (pile.length === 0) {
+      r = { x: TAB_X[col], y: TAB_Y, w: CARD_W, h: CARD_H };
+      if (lx >= r.x && lx < r.x + r.w && ly >= r.y && ly < r.y + r.h) {
+        return { type: 'tableau', idx: col, cardIdx: -1 };
+      }
+      continue;
+    }
+    const offs = fanOffsets(pile);
+    for (let i = pile.length - 1; i >= 0; i--) {
+      const cx = TAB_X[col];
+      const cy = TAB_Y + offs[i];
+      const exposedH = (i === pile.length - 1)
+                       ? CARD_H
+                       : (offs[i + 1] - offs[i]);
+      if (lx >= cx && lx < cx + CARD_W &&
+          ly >= cy && ly < cy + exposedH) {
+        return { type: 'tableau', idx: col, cardIdx: i };
+      }
+    }
+  }
+  return null;
+}
+
+function canPlaceOnFoundation(card, foundIdx) {
+  const top = foundations[foundIdx][foundations[foundIdx].length - 1];
+  if (!top) return rankVal(card.rank) === 1;
+  if (card.suit !== top.suit) return false;
+  return rankVal(card.rank) === rankVal(top.rank) + 1;
+}
+
+function findFoundationForCard(card) {
+  for (let i = 0; i < 4; i++) {
+    if (canPlaceOnFoundation(card, i)) return i;
+  }
+  return -1;
+}
+
+function canPlaceOnTableau(card, col) {
+  const pile = tableau[col];
+  if (pile.length === 0) return rankVal(card.rank) === 13;
+  const top = pile[pile.length - 1];
+  if (!top.faceUp) return false;
+  if (SUIT_RED[card.suit] === SUIT_RED[top.suit]) return false;
+  return rankVal(card.rank) === rankVal(top.rank) - 1;
+}
+
+function validRun(cards) {
+  for (let i = 0; i < cards.length; i++) {
+    if (!cards[i].faceUp) return false;
+    if (i > 0) {
+      const a = cards[i-1], b = cards[i];
+      if (SUIT_RED[a.suit] === SUIT_RED[b.suit]) return false;
+      if (rankVal(a.rank) !== rankVal(b.rank) + 1) return false;
+    }
+  }
+  return true;
+}
+
+function flipTopIfNeeded(col) {
+  const pile = tableau[col];
+  if (pile.length > 0 && !pile[pile.length - 1].faceUp) {
+    pile[pile.length - 1].faceUp = true;
+  }
+}
+
+function tryAutoToFoundation(hit) {
+  let card;
+  if (hit.type === 'waste' && waste.length > 0) {
+    card = waste[waste.length - 1];
+    const f = findFoundationForCard(card);
+    if (f >= 0) {
+      foundations[f].push(waste.pop());
+      moves++;
+      return true;
+    }
+  } else if (hit.type === 'tableau') {
+    const pile = tableau[hit.idx];
+    if (pile.length === 0) return false;
+    const top = pile[pile.length - 1];
+    if (hit.cardIdx !== pile.length - 1) return false;
+    if (!top.faceUp) return false;
+    const f = findFoundationForCard(top);
+    if (f >= 0) {
+      foundations[f].push(pile.pop());
+      flipTopIfNeeded(hit.idx);
+      moves++;
+      return true;
+    }
+  }
+  return false;
+}
+
+function tryDrawStock() {
+  if (stock.length > 0) {
+    const card = stock.pop();
+    card.faceUp = true;
+    waste.push(card);
+    moves++;
+    return true;
+  }
+  if (waste.length > 0) {
+    while (waste.length > 0) {
+      const c = waste.pop();
+      c.faceUp = false;
+      stock.push(c);
+    }
+    moves++;
+    return true;
+  }
+  return false;
+}
+
+function pickUp(hit) {
+  if (hit.type === 'waste') {
+    if (waste.length === 0) return null;
+    return { from: { type: 'waste', idx: 0 }, cards: [waste[waste.length - 1]] };
+  }
+  if (hit.type === 'foundation') {
+    const f = foundations[hit.idx];
+    if (f.length === 0) return null;
+    return { from: { type: 'foundation', idx: hit.idx }, cards: [f[f.length - 1]] };
+  }
+  if (hit.type === 'tableau') {
+    const pile = tableau[hit.idx];
+    if (pile.length === 0) return null;
+    if (hit.cardIdx < 0)   return null;
+    if (!pile[hit.cardIdx].faceUp) return null;
+    const cards = pile.slice(hit.cardIdx);
+    if (!validRun(cards)) return null;
+    return { from: { type: 'tableau', idx: hit.idx }, cards };
+  }
+  return null;
+}
+
+function dropOn(sel, hit) {
+  const cards = sel.cards;
+  if (hit.type === 'foundation') {
+    if (cards.length !== 1) return false;
+    if (!canPlaceOnFoundation(cards[0], hit.idx)) return false;
+    removeFromSource(sel.from);
+    foundations[hit.idx].push(cards[0]);
+    moves++;
+    return true;
+  }
+  if (hit.type === 'tableau') {
+    if (!canPlaceOnTableau(cards[0], hit.idx)) return false;
+    removeFromSource(sel.from);
+    for (const c of cards) tableau[hit.idx].push(c);
+    moves++;
+    return true;
+  }
+  return false;
+}
+
+function removeFromSource(from) {
+  if (from.type === 'waste') {
+    waste.pop();
+  } else if (from.type === 'foundation') {
+    foundations[from.idx].pop();
+  } else if (from.type === 'tableau') {
+    const pile = tableau[from.idx];
+    const cardIdxStart = pile.length - selection.cards.length;
+    pile.splice(cardIdxStart);
+    flipTopIfNeeded(from.idx);
+  }
+}
+
+function checkWin() {
+  for (const f of foundations) if (f.length !== 13) return false;
+  return true;
+}
+
+function physicalToLogical(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const localX = clientX - rect.left;
+  const localY = clientY - rect.top;
+  if (isPortrait()) {
+    const visualWidth  = rect.width;
+    const visualHeight = rect.height;
+    const cx = localY;
+    const cy = visualWidth - localX;
+    return { x: cx / SCALE, y: cy / SCALE };
+  } else {
+    return { x: localX / SCALE, y: localY / SCALE };
+  }
+}
+
+function handleTap(lx, ly) {
+  if (state === S.MENU)  { newDeal(); return; }
+  if (state === S.WIN)   { newDeal(); return; }
+  if (state !== S.PLAY) return;
+
+  const hit = hitTest(lx, ly);
+  if (!hit) {
+    selection = null;
+    return;
+  }
+
+  if (hit.type === 'stock') {
+    selection = null;
+    tryDrawStock();
+    return;
+  }
+
+  if (selection) {
+    if (dropOn(selection, hit)) {
+      selection = null;
+      if (checkWin()) {
+        if (bestMoves === 0 || moves < bestMoves) bestMoves = moves;
+        winAnimTimer = 0;
+        state = S.WIN;
+      }
+      return;
+    }
+    selection = null;
+    flashTimer = 0.25;
+    flashRect = null;
+    return;
+  }
+
+  if (tryAutoToFoundation(hit)) {
+    if (checkWin()) {
+      if (bestMoves === 0 || moves < bestMoves) bestMoves = moves;
+      state = S.WIN;
+    }
+    return;
+  }
+
+  selection = pickUp(hit);
+}
+
+canvas.addEventListener('mousedown', e => {
+  e.preventDefault();
+  const p = physicalToLogical(e.clientX, e.clientY);
+  handleTap(p.x, p.y);
+});
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  const p = physicalToLogical(t.clientX, t.clientY);
+  handleTap(p.x, p.y);
+}, { passive: false });
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault();
+    if (state === S.MENU || state === S.WIN) newDeal();
+  }
+  if (e.code === 'KeyN') newDeal();
+});
+
+let lastT = 0;
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0);
+  lastT = t;
+  if (flashTimer > 0) flashTimer -= dt;
+  if (state === S.WIN) winAnimTimer += dt;
+  render();
+  requestAnimationFrame(loop);
+}
+
+function render() {
+  pxCtx.fillStyle = COL.felt;
+  pxCtx.fillRect(0, 0, PX_W, PX_H);
+  pxCtx.fillStyle = COL.feltDark;
+  for (let y = 0; y < PX_H; y += 4) {
+    for (let x = (y % 8 === 0 ? 0 : 4); x < PX_W; x += 8) {
+      pxCtx.fillRect(x, y, 1, 1);
+    }
+  }
+
+  if (state === S.MENU) {
+    drawHUD();
+    drawOverlay('SOLITAIRE', 'TAP CARDS TO MOVE  -  TOP CARD AUTO-PLAYS', 'TAP / SPACE TO DEAL');
+    display();
+    return;
+  }
+
+  drawPiles();
+  drawSelectionHighlight();
+  drawHUD();
+
+  if (state === S.WIN) {
+    drawOverlay('YOU WIN', 'MOVES ' + moves + '   BEST ' + bestMoves, 'TAP / SPACE FOR NEW DEAL');
+  }
+  display();
+}
+
+function drawPiles() {
+  drawPileBase(STOCK_X, TOP_Y);
+  if (stock.length > 0) {
+    drawCard(STOCK_X, TOP_Y, null, false);
+    pxCtx.font = 'bold 8px monospace';
+    pxCtx.fillStyle = COL.cardBackHi;
+    pxCtx.textAlign = 'center';
+    pxCtx.fillText(stock.length, STOCK_X + CARD_W / 2, TOP_Y + CARD_H + 9);
+  } else {
+    drawRecycleHint(STOCK_X, TOP_Y);
+  }
+
+  drawPileBase(WASTE_X, TOP_Y);
+  if (waste.length > 0) {
+    drawCard(WASTE_X, TOP_Y, waste[waste.length - 1], true);
+  }
+
+  for (let i = 0; i < 4; i++) {
+    drawPileBase(FOUND_X[i], TOP_Y);
+    const f = foundations[i];
+    if (f.length > 0) drawCard(FOUND_X[i], TOP_Y, f[f.length - 1], true);
+    else              drawFoundationHint(FOUND_X[i], TOP_Y);
+  }
+
+  for (let col = 0; col < 7; col++) {
+    drawPileBase(TAB_X[col], TAB_Y);
+    const pile = tableau[col];
+    const offs = fanOffsets(pile);
+    for (let i = 0; i < pile.length; i++) {
+      drawCard(TAB_X[col], TAB_Y + offs[i], pile[i], pile[i].faceUp);
+    }
+  }
+}
+
+function drawPileBase(x, y) {
+  pxCtx.fillStyle = COL.empty;
+  pxCtx.fillRect(x, y, CARD_W, CARD_H);
+  pxCtx.fillStyle = COL.emptyEdge;
+  pxCtx.fillRect(x, y, CARD_W, 1);
+  pxCtx.fillRect(x, y + CARD_H - 1, CARD_W, 1);
+  pxCtx.fillRect(x, y, 1, CARD_H);
+  pxCtx.fillRect(x + CARD_W - 1, y, 1, CARD_H);
+}
+
+function drawFoundationHint(x, y) {
+  pxCtx.font = 'bold 10px monospace';
+  pxCtx.fillStyle = COL.feltLite;
+  pxCtx.textAlign = 'center';
+  pxCtx.fillText('A', x + CARD_W / 2, y + CARD_H / 2 + 4);
+}
+
+function drawRecycleHint(x, y) {
+  pxCtx.font = 'bold 10px monospace';
+  pxCtx.fillStyle = COL.feltLite;
+  pxCtx.textAlign = 'center';
+  pxCtx.fillText('↻', x + CARD_W / 2, y + CARD_H / 2 + 4);
+}
+
+function drawCard(x, y, card, faceUp) {
+  pxCtx.fillStyle = COL.cardShadow;
+  pxCtx.fillRect(x + 1, y + 2, CARD_W, CARD_H);
+
+  if (faceUp) {
+    pxCtx.fillStyle = COL.cardFace;
+  } else {
+    pxCtx.fillStyle = COL.cardBackA;
+  }
+  pxCtx.fillRect(x, y, CARD_W, CARD_H);
+
+  pxCtx.fillStyle = COL.cardEdge;
+  pxCtx.fillRect(x, y, CARD_W, 1);
+  pxCtx.fillRect(x, y + CARD_H - 1, CARD_W, 1);
+  pxCtx.fillRect(x, y, 1, CARD_H);
+  pxCtx.fillRect(x + CARD_W - 1, y, 1, CARD_H);
+  pxCtx.fillStyle = COL.felt;
+  pxCtx.fillRect(x, y, 1, 1);
+  pxCtx.fillRect(x + CARD_W - 1, y, 1, 1);
+  pxCtx.fillRect(x, y + CARD_H - 1, 1, 1);
+  pxCtx.fillRect(x + CARD_W - 1, y + CARD_H - 1, 1, 1);
+
+  if (faceUp && card) {
+    drawCardFace(x, y, card);
+  } else if (!faceUp) {
+    drawCardBack(x, y);
+  }
+}
+
+function drawCardFace(x, y, card) {
+  const isRed = !!SUIT_RED[card.suit];
+  const fg = isRed ? COL.red : COL.black;
+
+  pxCtx.font = 'bold 10px monospace';
+  pxCtx.fillStyle = fg;
+  pxCtx.textAlign = 'left';
+  pxCtx.fillText(card.rank, x + 3, y + 11);
+  pxCtx.font = '10px monospace';
+  pxCtx.fillText(card.suit, x + 3, y + 21);
+
+  pxCtx.font = 'bold 10px monospace';
+  pxCtx.textAlign = 'right';
+  pxCtx.fillText(card.rank, x + CARD_W - 3, y + CARD_H - 14);
+  pxCtx.font = '10px monospace';
+  pxCtx.fillText(card.suit, x + CARD_W - 3, y + CARD_H - 4);
+
+  pxCtx.font = 'bold 28px monospace';
+  pxCtx.textAlign = 'center';
+  pxCtx.fillStyle = fg;
+  pxCtx.fillText(card.suit, x + CARD_W / 2, y + CARD_H / 2 + 10);
+}
+
+function drawCardBack(x, y) {
+  pxCtx.fillStyle = COL.cardBackB;
+  for (let py = y + 3; py < y + CARD_H - 3; py += 4) {
+    for (let px_ = x + 3; px_ < x + CARD_W - 3; px_ += 4) {
+      pxCtx.fillRect(px_, py, 2, 2);
+    }
+  }
+  pxCtx.fillStyle = COL.cardBackHi;
+  pxCtx.fillRect(x + 2, y + 2, CARD_W - 4, 1);
+  pxCtx.fillRect(x + 2, y + CARD_H - 3, CARD_W - 4, 1);
+  pxCtx.fillRect(x + 2, y + 2, 1, CARD_H - 4);
+  pxCtx.fillRect(x + CARD_W - 3, y + 2, 1, CARD_H - 4);
+}
+
+function drawSelectionHighlight() {
+  if (!selection) return;
+  const f = selection.from;
+  if (f.type === 'tableau') {
+    const pile = tableau[f.idx];
+    const offs = fanOffsets(pile);
+    const startIdx = pile.length - selection.cards.length;
+    const yStart = TAB_Y + offs[startIdx];
+    const yEnd = TAB_Y + offs[pile.length - 1] + CARD_H;
+    drawHighlightFrame(TAB_X[f.idx] - 1, yStart - 1, CARD_W + 2, (yEnd - yStart) + 2);
+  } else if (f.type === 'waste') {
+    drawHighlightFrame(WASTE_X - 1, TOP_Y - 1, CARD_W + 2, CARD_H + 2);
+  } else if (f.type === 'foundation') {
+    drawHighlightFrame(FOUND_X[f.idx] - 1, TOP_Y - 1, CARD_W + 2, CARD_H + 2);
+  }
+}
+
+function drawHighlightFrame(x, y, w, h) {
+  pxCtx.fillStyle = COL.highlight;
+  pxCtx.fillRect(x, y, w, 1);
+  pxCtx.fillRect(x, y + h - 1, w, 1);
+  pxCtx.fillRect(x, y, 1, h);
+  pxCtx.fillRect(x + w - 1, y, 1, h);
+}
+
+function drawHUD() {
+  pxCtx.fillStyle = COL.hudBg;
+  pxCtx.fillRect(0, 0, PX_W, 12);
+  pxCtx.font = 'bold 8px monospace';
+  pxCtx.fillStyle = COL.hudText;
+  pxCtx.textAlign = 'left';
+  pxCtx.fillText('SOLITAIRE', 4, 9);
+  pxCtx.textAlign = 'center';
+  pxCtx.fillText('MOVES ' + moves, PX_W / 2, 9);
+  pxCtx.textAlign = 'right';
+  if (bestMoves > 0) pxCtx.fillText('BEST ' + bestMoves, PX_W - 4, 9);
+  pxCtx.textAlign = 'center';
+}
+
+function drawOverlay(title, subtitle, cta) {
+  pxCtx.fillStyle = '#000';
+  pxCtx.fillRect(40, PX_H/2 - 32, PX_W - 80, 64);
+  pxCtx.fillStyle = '#fff';
+  pxCtx.fillRect(40,        PX_H/2 - 32, PX_W - 80, 1);
+  pxCtx.fillRect(40,        PX_H/2 + 31, PX_W - 80, 1);
+  pxCtx.fillRect(40,        PX_H/2 - 32, 1, 64);
+  pxCtx.fillRect(PX_W - 41, PX_H/2 - 32, 1, 64);
+
+  pxCtx.textAlign = 'center';
+  pxCtx.font = 'bold 14px monospace';
+  pxCtx.fillStyle = COL.gold;
+  pxCtx.fillText(title, PX_W/2, PX_H/2 - 10);
+
+  if (subtitle) {
+    pxCtx.font = '8px monospace';
+    pxCtx.fillStyle = '#aaa';
+    pxCtx.fillText(subtitle, PX_W/2, PX_H/2 + 8);
+  }
+  if (cta) {
+    pxCtx.font = '8px monospace';
+    pxCtx.fillStyle = '#ffdd60';
+    pxCtx.fillText(cta, PX_W/2, PX_H/2 + 22);
+  }
+}
+
+function display() {
+  ctx.clearRect(0, 0, canvas.width / DPR, canvas.height / DPR);
+  ctx.drawImage(px, 0, 0, PX_W * SCALE, PX_H * SCALE);
+}
+
+startMenu();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>UFO Dash</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; align-items: center;
+         justify-content: center; height: 100vh; overflow: hidden; }
+  canvas { display: block; }
+  .menu-btn { position: fixed; top: 12px; right: 12px; z-index: 1000; padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: #fff; cursor: pointer; font-size: 12px; border-radius: 4px; font-family: monospace; }
+  .menu-btn:active { background: rgba(255,255,255,0.2); }
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+// --- Canvas setup (HiDPI) ---
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const DPR    = window.devicePixelRatio || 1;
+let W, H;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(DPR, DPR);
+}
+window.addEventListener('resize', () => { resize(); });
+resize();
+
+// --- State machine ---
+const S = { MENU: 0, PLAY: 1, DEAD: 2 };
+let state = S.MENU;
+
+// --- Input ---
+const keys = {};
+let jumpQueued = false;   // edge-triggered: set on press, consumed once per frame
+let thrust = false;       // retained only for visual cues (glow/particles) on press
+
+function doJump() {
+  // Queue a jump for the next physics step (consumed in updatePlayer)
+  jumpQueued = true;
+  thrust = true;
+}
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (!e.repeat) doJump();   // ignore auto-repeat while held -- one jump per press
+  }
+});
+window.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'Space') thrust = false;
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (state === S.MENU) { startGame(); return; }
+  if (state === S.DEAD) { startGame(); return; }
+  doJump();
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  thrust = false;
+}, { passive: false });
+
+canvas.addEventListener('mousedown', () => {
+  if (state === S.MENU || state === S.DEAD) { startGame(); return; }
+  doJump();
+});
+canvas.addEventListener('mouseup',   () => { thrust = false; });
+
+// ============================================================================
+// CONFIG -- tweak gameplay feel and appearance here. Everything tunable lives
+// in this block; the rest of the script reads from it via the aliases below.
+// ============================================================================
+const CONFIG = {
+  physics: {
+    gravity:      1400,  // px/s^2 downward, applied every frame (always on)
+    jumpVelocity:  460,  // px/s upward impulse set on each press (the "hop")
+    maxFallSpeed:  700,  // px/s terminal downward velocity (clamp)
+  },
+  craft: {
+    width:  44,          // saucer hull width  (collision + draw)
+    height: 22,          // saucer hull height (collision + draw)
+  },
+  pipes: {
+    gap:       180,      // vertical gap the craft flies through (px)
+    width:      52,      // pipe column width (px)
+    speed:     220,      // base scroll speed (px/s); ramps up with distance
+    interval:  1.8,      // seconds between pipe spawns at base speed
+  },
+  colours: {
+    hull:       '#2f9e57',          // saucer body green
+    hullShadow: '#1f7a40',          // lower rim shadow
+    hullLight:  '#54c97e',          // upper highlight band
+    dome:       'rgba(90,180,255,0.92)',  // blue glass canopy
+    glow:       '90,220,255',       // under-glow RGB (alpha applied in draw)
+    lightGreen: '#9bf6c4',          // rim light, lit (green slots)
+    lightBlue:  '#9bdcff',          // rim light, lit (blue slots)
+  },
+};
+
+// --- Derived aliases (keep existing names working; do not edit -- change CONFIG) ---
+const GRAVITY       = CONFIG.physics.gravity;
+const JUMP_VELOCITY = CONFIG.physics.jumpVelocity;
+const MAX_FALL      = CONFIG.physics.maxFallSpeed;
+const HELI_W        = CONFIG.craft.width;
+const HELI_H        = CONFIG.craft.height;
+const GAP_H         = CONFIG.pipes.gap;
+const PIPE_W        = CONFIG.pipes.width;
+const PIPE_SPEED    = CONFIG.pipes.speed;
+const PIPE_INTERVAL = CONFIG.pipes.interval;
+
+
+// --- Game state ---
+let heli, pipes, score, dist, pipeTimer, speed, best;
+best = 0;
+
+// Particle system (from skill)
+const particles = [];
+
+function spawnParticles(x, y, count, opts = {}) {
+  const { color = '#f80', speed: spd = 120, life = 0.5, size = 3 } = opts;
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const v = (0.5 + Math.random() * 0.5) * spd;
+    particles.push({ x, y, vx: Math.cos(angle)*v, vy: Math.sin(angle)*v,
+                     life, maxLife: life, size, color });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function renderParticles() {
+  for (const p of particles) {
+    const a = p.life / p.maxLife;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * a, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function makePipe() {
+  // gapY = centre of the gap
+  const minGapY = GAP_H / 2 + 40;
+  const maxGapY = H - GAP_H / 2 - 40;
+  const gapY = minGapY + Math.random() * (maxGapY - minGapY);
+  return { x: W + PIPE_W, gapY, passed: false };
+}
+
+function startGame() {
+  heli = { x: W * 0.22, y: H / 2, vy: 0, angle: 0, rotorAngle: 0 };
+  pipes = [];
+  particles.length = 0;
+  score = 0;
+  dist  = 0;
+  pipeTimer = PIPE_INTERVAL * 0.5; // first pipe sooner
+  speed = PIPE_SPEED;
+  state = S.PLAY;
+}
+
+// --- Game loop ---
+let lastT = 0;
+
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0);
+  lastT = t;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  switch (state) {
+    case S.MENU: updateMenu(dt); break;
+    case S.PLAY: updatePlay(dt); break;
+    case S.DEAD: updateDead(dt); break;
+  }
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  switch (state) {
+    case S.MENU: renderMenu(); break;
+    case S.PLAY: renderPlay(); break;
+    case S.DEAD: renderDead(); break;
+  }
+}
+
+// --- MENU ---
+function updateMenu(dt) {
+  if (keys['Space']) { keys['Space'] = false; startGame(); }
+}
+
+function renderMenu() {
+  drawBackground(0);
+  drawOverlay('UFO DASH', 'Tap to jump, dodge the pipes', 'PRESS SPACE / TAP TO START');
+}
+
+// --- PLAY ---
+function updatePlay(dt) {
+  dist  += speed * dt;
+  speed  = PIPE_SPEED + dist * 0.012; // gentle acceleration
+
+  // UFO physics: gravity pulls down constantly; a jump sets an instant
+  // upward velocity (impulse), so the craft hops from its current position.
+  if (jumpQueued) {
+    heli.vy = -JUMP_VELOCITY;
+    jumpQueued = false;
+    spawnParticles(heli.x - 4, heli.y + HELI_H / 2, 6,
+      { color: 'rgba(140,230,180,0.8)', speed: 90, life: 0.3, size: 2 });
+  }
+  heli.vy += GRAVITY * dt;
+  heli.vy  = Math.max(-JUMP_VELOCITY, Math.min(MAX_FALL, heli.vy));
+  heli.y  += heli.vy * dt;
+  // Tilt: nose up when rising, down when falling
+  heli.angle = Math.max(-0.4, Math.min(0.6, heli.vy / 900));
+  heli.rotorAngle += 18 * dt * Math.PI * 2;
+
+  // Pipes
+  pipeTimer -= dt;
+  if (pipeTimer <= 0) {
+    pipes.push(makePipe());
+    pipeTimer = PIPE_INTERVAL * (PIPE_SPEED / speed); // tighter at higher speed
+  }
+
+  for (let i = pipes.length - 1; i >= 0; i--) {
+    pipes[i].x -= speed * dt;
+    if (!pipes[i].passed && pipes[i].x + PIPE_W < heli.x) {
+      pipes[i].passed = true;
+      score++;
+    }
+    if (pipes[i].x + PIPE_W < -10) pipes.splice(i, 1);
+  }
+
+  updateParticles(dt);
+
+  // Collision: ceiling / floor
+  if (heli.y - HELI_H / 2 < 0 || heli.y + HELI_H / 2 > H) die();
+
+  // Collision: pipes
+  for (const p of pipes) {
+    if (rectHit(heli, p)) { die(); break; }
+  }
+}
+
+function rectHit(h, p) {
+  const hx1 = h.x - HELI_W / 2 + 4, hx2 = h.x + HELI_W / 2 - 4;
+  const hy1 = h.y - HELI_H / 2 + 4, hy2 = h.y + HELI_H / 2 - 4;
+  const px1 = p.x, px2 = p.x + PIPE_W;
+  if (hx2 < px1 || hx1 > px2) return false;
+  // hit top pipe or bottom pipe
+  const topBase = p.gapY - GAP_H / 2;
+  const botTop  = p.gapY + GAP_H / 2;
+  return hy1 < topBase || hy2 > botTop;
+}
+
+function die() {
+  spawnParticles(heli.x, heli.y, 24, { color: '#f80', speed: 200, life: 0.8, size: 5 });
+  spawnParticles(heli.x, heli.y, 16, { color: '#ff0', speed: 120, life: 0.5, size: 3 });
+  if (score > best) best = score;
+  state = S.DEAD;
+}
+
+function renderPlay() {
+  drawBackground(dist);
+  drawPipes();
+  renderParticles();
+  drawHeli();
+  drawHUD();
+}
+
+// --- DEAD ---
+let deadThrust = false;
+
+function updateDead(dt) {
+  updateParticles(dt);
+  // Wait for input to restart — but don't restart on the same keydown that killed
+  if (!deadThrust && (keys['Space'] || keys['Enter'])) {
+    deadThrust = true;
+  }
+  if (deadThrust && !keys['Space'] && !keys['Enter']) {
+    startGame();
+    deadThrust = false;
+  }
+}
+
+function renderDead() {
+  drawBackground(dist);
+  drawPipes();
+  renderParticles();
+  drawHUD();
+  drawOverlay(
+    'CRASHED',
+    'Score: ' + score + '   Best: ' + best,
+    'SPACE / TAP TO RETRY'
+  );
+}
+
+// --- Drawing ---
+
+function drawBackground(scroll) {
+  // Sky gradient
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#0a1628');
+  sky.addColorStop(1, '#1a3a5c');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // Parallax mountains (two layers)
+  drawMountains(scroll * 0.15, '#1a2e44', 0.45);
+  drawMountains(scroll * 0.3,  '#162540', 0.62);
+
+  // Ground strip
+  ctx.fillStyle = '#0d1f10';
+  ctx.fillRect(0, H - 28, W, 28);
+  ctx.fillStyle = '#1a3a1e';
+  ctx.fillRect(0, H - 28, W, 6);
+}
+
+function drawMountains(offset, color, heightFrac) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  const peaks = 7;
+  for (let i = 0; i <= peaks; i++) {
+    const x  = ((i / peaks) * W * 1.4 - (offset % (W * 1.4 / peaks))) % (W + 100) - 50;
+    const bx = x + W / peaks / 2;
+    ctx.lineTo(x,  H * heightFrac + 60);
+    ctx.lineTo(bx, H * heightFrac - 60);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawPipes() {
+  for (const p of pipes) {
+    const topH  = p.gapY - GAP_H / 2;
+    const botY  = p.gapY + GAP_H / 2;
+    const botH  = H - botY;
+
+    // Pipe body
+    const grad = ctx.createLinearGradient(p.x, 0, p.x + PIPE_W, 0);
+    grad.addColorStop(0,   '#2a6e2a');
+    grad.addColorStop(0.4, '#4daa4d');
+    grad.addColorStop(1,   '#1a4a1a');
+    ctx.fillStyle = grad;
+
+    ctx.fillRect(p.x,     0,    PIPE_W, topH);
+    ctx.fillRect(p.x,     botY, PIPE_W, botH);
+
+    // Pipe caps
+    const capW = PIPE_W + 8;
+    const capH = 18;
+    ctx.fillStyle = '#3a8a3a';
+    ctx.fillRect(p.x - 4, topH - capH, capW, capH);
+    ctx.fillRect(p.x - 4, botY,        capW, capH);
+
+    // Cap highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(p.x - 4, topH - capH, capW, 4);
+    ctx.fillRect(p.x - 4, botY,        capW, 4);
+  }
+}
+
+function drawHeli() {
+  ctx.save();
+  ctx.translate(heli.x, heli.y);
+  ctx.rotate(heli.angle * 0.6);  // gentler tilt for a saucer
+
+  const R = HELI_W / 2;          // saucer radius
+
+  // Under-glow: pulsing halo beneath the craft
+  const pulse = 0.55 + 0.45 * Math.sin(heli.rotorAngle);
+  ctx.save();
+  ctx.globalAlpha = 0.25 + 0.25 * pulse;
+  const glow = ctx.createRadialGradient(0, 8, 2, 0, 8, R);
+  glow.addColorStop(0, 'rgba(' + CONFIG.colours.glow + ',0.9)');
+  glow.addColorStop(1, 'rgba(' + CONFIG.colours.glow + ',0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.ellipse(0, 10, R, R * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Saucer body -- broad ellipse
+  ctx.fillStyle = CONFIG.colours.hull;
+  ctx.beginPath();
+  ctx.ellipse(0, 2, R, HELI_H * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Lower rim shadow
+  ctx.fillStyle = CONFIG.colours.hullShadow;
+  ctx.beginPath();
+  ctx.ellipse(0, 6, R, HELI_H * 0.32, 0, 0, Math.PI);
+  ctx.fill();
+
+  // Upper hull highlight band
+  ctx.fillStyle = CONFIG.colours.hullLight;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, R * 0.82, HELI_H * 0.30, 0, Math.PI, Math.PI * 2);
+  ctx.fill();
+
+  // Dome -- glass canopy on top
+  ctx.fillStyle = CONFIG.colours.dome;
+  ctx.beginPath();
+  ctx.ellipse(0, -4, R * 0.42, HELI_H * 0.62, 0, Math.PI, Math.PI * 2);
+  ctx.fill();
+  // Dome rim
+  ctx.strokeStyle = 'rgba(220,245,255,0.7)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(0, -4, R * 0.42, HELI_H * 0.62, 0, Math.PI, Math.PI * 2);
+  ctx.stroke();
+  // Dome glint
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath();
+  ctx.ellipse(-5, -8, 3, 5, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Running lights around the rim -- alternating blue/green, chasing
+  const lights = 6;
+  for (let i = 0; i < lights; i++) {
+    const a = (i / lights) * Math.PI * 2;
+    const lx = Math.cos(a) * R * 0.78;
+    const ly = 4 + Math.sin(a) * HELI_H * 0.34;
+    const lit = (Math.sin(heli.rotorAngle * 2 + i) > 0);
+    ctx.fillStyle = (i % 2 === 0)
+      ? (lit ? CONFIG.colours.lightGreen : '#2f7a52')
+      : (lit ? CONFIG.colours.lightBlue  : '#2f6a8a');
+    ctx.beginPath();
+    ctx.arc(lx, ly, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.font = 'bold 22px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(score, W / 2, 44);
+  ctx.shadowBlur = 0;
+}
+
+// Overlay helper (from skill)
+function drawOverlay(title, subtitle, cta) {
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 8;
+
+  ctx.font = 'bold 48px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(title, W / 2, H / 2 - 40);
+
+  if (subtitle) {
+    ctx.font = '20px monospace';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText(subtitle, W / 2, H / 2 + 10);
+  }
+
+  if (cta) {
+    ctx.font = '16px monospace';
+    ctx.fillStyle = '#ff0';
+    ctx.fillText(cta, W / 2, H / 2 + 50);
+  }
+
+  ctx.shadowBlur = 0;
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
