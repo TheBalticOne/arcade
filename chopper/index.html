@@ -120,35 +120,42 @@ canvas.addEventListener('mouseup',   () => { thrust = false; });
 // --- Constants ---
 const GRAVITY       = 280;
 const THRUST_FORCE  = 580;
-// Craft size multiplier. 1.0 = original. Scales the drawn sprite, the rotor
-// bar, and the collision box together so visuals and hitbox stay in step.
-const HELI_SCALE    = 1.2;
-const HELI_W        = Math.round(24 * HELI_SCALE);
-const HELI_H        = Math.round(10 * HELI_SCALE);
-// Drawn sprite size in logical px (source grid is 16x7).
-const SPR_W         = Math.round(16 * HELI_SCALE);
-const SPR_H         = Math.round(7  * HELI_SCALE);
+// Craft geometry. Sprite is authored at native size (20x9) and drawn at an
+// integer scale (1) so nearest-neighbour sampling never duplicates rows/cols.
+const HELI_W        = 30;  // offset from heli.x (nose reference) to sprite's left edge
+const HELI_H        = 14;  // vertical placement helper, see heliSpriteRect()
+const SPR_W         = 20;  // drawn sprite size in logical px (source grid is 20x9)
+const SPR_H         = 9;
 // Hitbox forgiveness: how far the collision box is inset from the drawn
 // sprite on each side. Larger = more forgiving. The box is derived from the
 // sprite's own draw rect, so visuals and collision cannot drift apart.
 const HIT_INSET_X   = 2;
 const HIT_INSET_Y   = 1;
+const HITBOX_H      = SPR_H - HIT_INSET_Y * 2; // true collision height, used to size new obstacles safely
 const MIN_GAP       = 52;   // guaranteed min terrain gap in logical px
 const TERRAIN_STEP  = 4;    // px per terrain column
 const SCROLL_SPEED  = 60;   // base px/s, increases with distance
 const BIOME_LEN     = 1800; // logical px per biome
 
-// --- Sprite: 16x7 military helicopter, facing right ---
+// New content pacing (distance, in the same px units as `dist`)
+const BLOCK_START_DIST = 650;
+const FORK_START_DIST  = 1000;
+const FORK_MIN_INTERVAL = 500;
+const LANE_SLACK = 6; // extra headroom (logical px) added to the bare hitbox when sizing a safe lane
+
+// --- Sprite: 20x9 military helicopter, facing right ---
 // Uses palette indices: 3=dark hull, 4=mid hull, 5=light hull,
-// 6=cockpit glass, 7=highlight, 8=rotor/danger, 9=exhaust
+// 6=cockpit glass, 7=highlight, 8=tail-rotor accent, 9=exhaust
 const SPR_HELI = [
-  [0,0,0,0,0,0,0,5,5,5,5,5,0,0,0,0],
-  [0,0,0,0,0,5,5,4,4,4,4,4,5,0,0,0],
-  [0,8,8,8,4,4,6,6,4,4,3,3,4,5,5,0],
-  [3,4,4,4,4,4,4,6,4,4,4,4,4,4,4,3],
-  [0,3,3,4,4,4,4,4,4,4,3,3,3,3,0,0],
-  [0,0,0,3,0,0,3,0,0,3,0,0,0,0,0,0],
-  [0,0,0,3,0,0,3,0,0,3,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,4,4,5,4,4,0,0,0,0,0],
+  [0,0,8,8,0,0,0,0,4,4,4,4,4,4,6,6,6,6,0,0],
+  [3,4,4,4,4,4,4,4,4,4,4,4,4,4,6,6,6,6,5,0],
+  [3,3,3,4,4,4,4,4,4,4,4,4,4,4,4,4,4,7,5,0],
+  [0,0,3,3,3,3,3,3,9,3,3,3,3,3,3,3,3,0,0,0],
+  [0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,3,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,3,0,0,0,0],
+  [0,3,0,0,0,0,0,0,3,3,3,3,3,3,3,3,3,0,0,0],
 ];
 
 // --- Sprite helpers ---
@@ -208,15 +215,21 @@ function heliHitbox() {
 // --- Game state ---
 let heli, dist, speed, biomeIdx, biomeProgress, nextBiomeProgress;
 let palette, biome;
-let terrainCols;   // array of { ceil, floor } in logical px
+let terrainCols;   // array of { ceil, floor, decorCeil, decorFloor, divTop?, divBot? } in logical px
 let scrollOffset;  // fractional pixel scroll accumulator
 let rocks;         // array of { worldX, y, w, h } -- world-space x, scrolled each frame
-let rockSpawnAccum;// distance accumulator for rock spawning
+let blocks;        // array of { worldX, y, w, h, baseY, amp, phase, omega } -- oscillating platforms
+let pickups;       // array of { worldX, y, w, h, taken } -- bonus orbs hidden in secret-path forks
+let fork;          // active tunnel-fork state, or null
+let rockSpawnAccum, blockSpawnAccum, distSinceLastFork;
 let awaitingRelease = false;
 let best = 0;
+let bonus = 0;
+let animClock = 0;
 
-// Particle system
-const particles = [];
+// Particle systems (shared update/render, separate arrays so draw order can differ)
+const particles = []; // foreground: smoke, sparks, pickup sparkle
+const ambient   = [];  // background: parallax atmosphere, drawn behind terrain
 
 function spawnParticles(x, y, count, color, spd, life, size, scrollVx = 0) {
   for (let i = 0; i < count; i++) {
@@ -229,18 +242,32 @@ function spawnParticles(x, y, count, color, spd, life, size, scrollVx = 0) {
   }
 }
 
-function updateParticles(dt) {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
+function spawnAmbient() {
+  const x = PX_W + 4, y = Math.random() * PX_H;
+  let vx, vy, color, size, life;
+  switch (biome.key) {
+    case 'ARCTIC':  vx = -speed*0.5;  vy =  20 + Math.random()*10; color = '#ffffff'; size = 1; life = 4;   break;
+    case 'OCEAN':   vx = -speed*0.4;  vy = -(10 + Math.random()*10); color = '#aeeeff'; size = 1; life = 4; break;
+    case 'EARTH':   vx = -speed*0.3;  vy = (Math.random()-0.5)*4; color = '#d8ff88'; size = 1; life = 5;    break;
+    case 'DESERT':  vx = -speed*0.7 - 10; vy = (Math.random()-0.5)*3; color = '#f0d888'; size = 1; life = 3; break;
+    case 'MACHINE': vx = -speed*0.3;  vy = (Math.random()-0.5)*6; color = '#ffaa33'; size = 1; life = 0.6;  break;
+    default:        vx = -speed*0.15; vy = 0; color = '#ffffff'; size = 1; life = 6; // SPACE: slow twinkling stars
+  }
+  ambient.push({ x, y, vx, vy, life, maxLife: life, size, color });
+}
+
+function updateParticleArray(arr, dt) {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const p = arr[i];
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.vy += 8 * dt; // slight droop
     p.life -= dt;
-    if (p.life <= 0) particles.splice(i, 1);
+    if (p.life <= 0) arr.splice(i, 1);
   }
 }
 
-function renderParticles() {
-  for (const p of particles) {
+function renderParticleArray(arr) {
+  for (const p of arr) {
     if (p.life / p.maxLife < 0.12) continue;
     pxCtx.fillStyle = p.color;
     pxCtx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size);
@@ -265,7 +292,14 @@ function genCol(prevCeil, prevFloor, difficulty) {
   if (floor - ceil < minGap) floor = ceil + minGap;
   if (floor > PX_H - 4)     floor = PX_H - 4;
 
-  return { ceil: Math.round(ceil), floor: Math.round(floor) };
+  return {
+    ceil: Math.round(ceil), floor: Math.round(floor),
+    // Decoration flags are rolled once at generation time so they stay
+    // attached to this column as it scrolls, instead of flickering with
+    // the ring buffer's shifting index.
+    decorCeil:  Math.random() < 0.25 ? 3 + Math.floor(Math.random()*4) : 0,
+    decorFloor: Math.random() < 0.25 ? 3 + Math.floor(Math.random()*4) : 0,
+  };
 }
 
 function initTerrain() {
@@ -278,10 +312,128 @@ function initTerrain() {
   }
 }
 
+// --- Secret-path forks -------------------------------------------------
+// A fork splits the tunnel's gap into two lanes for a stretch: a wide "main"
+// lane that always stays the easy through-route, and a narrower "secret"
+// lane holding a bonus pickup. Both lanes are re-sized every column from
+// that column's *current* gap, so if the outer walls drift tighter mid-fork
+// the divider shrinks or drops out entirely rather than ever sealing either
+// lane below a safe minimum -- there is no way for a fork to cause an
+// unavoidable death.
+//
+// The hitbox spans several columns at once (its width divided by
+// TERRAIN_STEP), and each column's ceil/floor/divider is generated
+// independently with up to `maxShift` of drift from its neighbour. A lane
+// sized to just the bare hitbox height can't actually be flown through if
+// the columns under the hitbox disagree by more than the slack -- so the
+// safe minimum has to grow with the same drift budget genCol uses, not stay
+// a fixed constant.
+const HIT_SPAN_COLS = Math.ceil((SPR_W - 2 * HIT_INSET_X) / TERRAIN_STEP) + 1;
+function safeMinLane(difficulty) {
+  const maxShift = 2 + difficulty * 1.5;
+  return HITBOX_H + LANE_SLACK * 2 + Math.ceil(maxShift * (HIT_SPAN_COLS - 1));
+}
+
+function tryStartFork(col, difficulty) {
+  const gap = col.floor - col.ceil;
+  const minLane = safeMinLane(difficulty);
+  const divThickness = Math.max(3, Math.round(gap * 0.06));
+  if (gap < minLane * 2 + divThickness) return null; // not enough room to fork safely here
+  return {
+    phase: 'ramp-in', colsInPhase: 0,
+    rampCols: 8,
+    holdCols: 26 + Math.floor(Math.random() * 20),
+    secretSide: Math.random() < 0.5 ? 'upper' : 'lower',
+    divThickness,
+    pickupPlaced: false,
+  };
+}
+
+function placePickupInFork(col, f, difficulty) {
+  if (col.divTop === undefined) return; // divider collapsed this column -- skip, safety over reward
+  const minLane = safeMinLane(difficulty);
+  const size = Math.max(4, Math.round(minLane * 0.4));
+  const top = f.secretSide === 'upper' ? col.ceil     : col.divBot;
+  const bot = f.secretSide === 'upper' ? col.divTop   : col.floor;
+  pickups.push({ worldX: PX_W + 8, y: Math.round((top + bot) / 2 - size / 2), w: size, h: size, taken: false });
+}
+
 function shiftTerrain(difficulty) {
   terrainCols.shift();
   const last = terrainCols[terrainCols.length - 1];
-  terrainCols.push(genCol(last.ceil, last.floor, difficulty));
+  const col = genCol(last.ceil, last.floor, difficulty);
+
+  distSinceLastFork += TERRAIN_STEP;
+  if (!fork && dist > FORK_START_DIST && distSinceLastFork > FORK_MIN_INTERVAL) {
+    const f = tryStartFork(col, difficulty);
+    if (f) { fork = f; distSinceLastFork = 0; }
+  }
+
+  if (fork) {
+    const gap = col.floor - col.ceil;
+    const minLane = safeMinLane(difficulty);
+    fork.colsInPhase++;
+
+    // Capture hold-phase state before any transition below can advance
+    // fork.phase/colsInPhase, so pickup placement (which needs this
+    // column's divTop/divBot, computed further down) still fires on the
+    // correct column even if this is also the last column of the hold.
+    const wasHold        = fork.phase === 'hold';
+    const holdColsAtEntry = fork.colsInPhase;
+
+    let thick;
+    if (fork.phase === 'ramp-in') {
+      thick = fork.divThickness * Math.min(1, fork.colsInPhase / fork.rampCols);
+      if (fork.colsInPhase >= fork.rampCols) { fork.phase = 'hold'; fork.colsInPhase = 0; }
+    } else if (fork.phase === 'hold') {
+      thick = fork.divThickness;
+      if (fork.colsInPhase >= fork.holdCols) { fork.phase = 'ramp-out'; fork.colsInPhase = 0; }
+    } else {
+      thick = fork.divThickness * Math.max(0, 1 - fork.colsInPhase / fork.rampCols);
+      if (fork.colsInPhase >= fork.rampCols) fork = null;
+    }
+
+    if (thick > 0.5) {
+      const usable = gap - thick;
+      if (usable >= minLane * 2) {
+        let secretLane = Math.max(minLane, Math.round(usable * 0.34));
+        let mainLane = usable - secretLane;
+        if (mainLane < minLane) { mainLane = minLane; secretLane = usable - mainLane; }
+        // fork.divThickness hits exactly 0 the instant fork is nulled below
+        // (ramp-out's multiplier reaches 0 there), so thick > 0.5 can never
+        // be true with fork === null; `side` is still guarded defensively.
+        const side = fork ? fork.secretSide : null;
+        if (side === 'upper') {
+          col.divTop = Math.round(col.ceil + secretLane);
+          col.divBot = Math.round(col.divTop + thick);
+        } else if (side === 'lower') {
+          col.divBot = Math.round(col.floor - secretLane);
+          col.divTop = Math.round(col.divBot - thick);
+        }
+      }
+    }
+
+    // Place the bonus pickup now that this column's divider (if any) is set.
+    if (wasHold && fork && !fork.pickupPlaced && holdColsAtEntry >= Math.floor(fork.holdCols / 2)) {
+      fork.pickupPlaced = true;
+      placePickupInFork(col, fork, difficulty);
+    }
+  }
+
+  terrainCols.push(col);
+}
+
+// --- Obstacles: hanging rocks (static) and platforms (oscillating) -----
+// Both travel in world space independently of the terrain ring buffer, so
+// each frame they're re-clamped against the *current* local gap -- this is
+// what stops the tunnel narrowing around one after it spawned.
+function clampToLocalGap(worldX, y, h, slack) {
+  const idx = Math.min(Math.max(Math.floor((worldX + scrollOffset) / TERRAIN_STEP), 0), terrainCols.length - 1);
+  const col = terrainCols[idx];
+  const minY = col.ceil + slack;
+  const maxY = col.floor - h - slack;
+  if (maxY <= minY) return y; // gap too tight to safely re-clamp this frame; leave as-is (terrain drifts gradually)
+  return Math.min(maxY, Math.max(minY, y));
 }
 
 // --- Biome ---
@@ -298,8 +450,16 @@ function startGame() {
   biomeProgress = 0; nextBiomeProgress = BIOME_LEN;
   setBiome(0);
   particles.length = 0;
+  ambient.length = 0;
   rocks = [];
+  blocks = [];
+  pickups = [];
+  fork = null;
   rockSpawnAccum = 0;
+  blockSpawnAccum = 0;
+  distSinceLastFork = 0;
+  bonus = 0;
+  animClock = 0;
   scrollOffset = 0;
   initTerrain();
   awaitingRelease = false;
@@ -347,12 +507,14 @@ function renderMenu() {
   pxCtx.fillStyle = '#1a1a2e';
   pxCtx.fillRect(0, 0,      PX_W, 30);
   pxCtx.fillRect(0, PX_H-30, PX_W, 30);
-  drawSpriteScaled(SPR_HELI, PAL.MACHINE, PX_W/2 - 12 * HELI_SCALE, PX_H/2 - 4 * HELI_SCALE, 2 * HELI_SCALE);
+  drawSpriteScaled(SPR_HELI, PAL.MACHINE, PX_W/2 - SPR_W*1.5, PX_H/2 - SPR_H*1.5, 3);
   drawOverlay('CHOPPER', 'DAMAGED. KEEP FLYING.', 'HOLD SPACE / TAP TO FLY');
 }
 
 // --- PLAY ---
 function updatePlay(dt) {
+  animClock += dt;
+
   // Speed and distance
   dist  += speed * dt;
   speed  = SCROLL_SPEED + dist * 0.018;
@@ -374,18 +536,42 @@ function updatePlay(dt) {
     shiftTerrain(difficulty);
   }
 
-  // Scroll rocks and cull off-screen
-  for (const r of rocks) r.worldX -= speed * dt;
+  // Scroll rocks and cull off-screen; re-clamp against the current local gap
+  // each frame so terrain generated after a rock spawned can't close around it.
+  for (const r of rocks) {
+    r.worldX -= speed * dt;
+    r.y = clampToLocalGap(r.worldX + r.w / 2, r.y, r.h, HIT_INSET_Y + 3);
+  }
   for (let i = rocks.length - 1; i >= 0; i--) {
     if (rocks[i].worldX + rocks[i].w < 0) rocks.splice(i, 1);
   }
 
-  // Spawn hanging rocks -- minimum 300px clear gap from start, then spacing shrinks with difficulty
+  // Scroll oscillating platforms
+  for (const b of blocks) {
+    b.worldX -= speed * dt;
+    b.phase += b.omega * dt;
+    const target = b.baseY + Math.sin(b.phase) * b.amp;
+    b.y = clampToLocalGap(b.worldX + b.w / 2, target, b.h, HIT_INSET_Y + 3);
+  }
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i].worldX + blocks[i].w < 0) blocks.splice(i, 1);
+  }
+
+  // Scroll pickups
+  for (const p of pickups) {
+    p.worldX -= speed * dt;
+    p.y = clampToLocalGap(p.worldX + p.w / 2, p.y, p.h, 2);
+  }
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    if (pickups[i].taken || pickups[i].worldX + pickups[i].w < 0) pickups.splice(i, 1);
+  }
+
+  // Spawn hanging rocks -- minimum 300px clear gap from start, then spacing shrinks with difficulty.
+  // Suppressed during an active fork to avoid stacking obstacle types inside the split lanes.
   rockSpawnAccum += speed * dt;
   const rockInterval = Math.max(120, 280 - difficulty * 18);
-  if (dist > 300 && rockSpawnAccum >= rockInterval) {
+  if (!fork && dist > 300 && rockSpawnAccum >= rockInterval) {
     rockSpawnAccum = 0;
-    // Pick a terrain column near the right edge to read gap bounds
     const refCol = terrainCols[terrainCols.length - 6] || terrainCols[terrainCols.length - 1];
     const gap    = refCol.floor - refCol.ceil;
     const rh     = Math.max(6, Math.round(gap * 0.20));           // 20% of gap height
@@ -398,6 +584,30 @@ function updatePlay(dt) {
       rocks.push({ worldX: PX_W + 8, y: ry, w: rw, h: rh });
     }
   }
+
+  // Spawn oscillating platforms -- introduced later than rocks, also paused during a fork.
+  blockSpawnAccum += speed * dt;
+  const blockInterval = Math.max(220, 420 - difficulty * 24);
+  if (!fork && dist > BLOCK_START_DIST && blockSpawnAccum >= blockInterval) {
+    blockSpawnAccum = 0;
+    const refCol = terrainCols[terrainCols.length - 6] || terrainCols[terrainCols.length - 1];
+    const gap    = refCol.floor - refCol.ceil;
+    const bh     = Math.max(8, Math.round(gap * 0.26));
+    const bw     = Math.max(10, Math.round(PX_W * 0.05));
+    const margin = 6;
+    const amp    = Math.round((gap - bh) / 2) - margin;
+    if (amp > 4) {
+      blocks.push({
+        worldX: PX_W + 8, w: bw, h: bh,
+        baseY: (refCol.ceil + refCol.floor) / 2 - bh / 2,
+        amp, phase: Math.random() * Math.PI * 2,
+        omega: 1.3 + Math.random() * 0.7 + difficulty * 0.05,
+      });
+    }
+  }
+
+  // Ambient background atmosphere (purely decorative, never collides)
+  if (Math.random() < 0.2) spawnAmbient();
 
   // Heli physics -- falls by default, rises on thrust
   const accel = thrust ? -(THRUST_FORCE - GRAVITY) : GRAVITY;
@@ -416,7 +626,8 @@ function updatePlay(dt) {
     spawnParticles(heli.x - HELI_W + 2, heli.y, 3, '#444444', 10, 0.8, 2, -speed);
   }
 
-  updateParticles(dt);
+  updateParticleArray(particles, dt);
+  updateParticleArray(ambient, dt);
 
   // Collision: hitbox derived from the drawn sprite, inset for forgiveness
   const hb    = heliHitbox();
@@ -427,13 +638,14 @@ function updatePlay(dt) {
 
   if (hTop < 0 || hBot > PX_H) { die(); return; }
 
-  // Collision: terrain columns spanned by the hitbox
+  // Collision: terrain columns spanned by the hitbox (outer walls + any fork divider)
   const colStart = Math.floor((hLeft + scrollOffset) / TERRAIN_STEP);
   const colEnd   = Math.floor((hRight + scrollOffset) / TERRAIN_STEP);
   for (let i = colStart; i <= colEnd; i++) {
     const ci = Math.min(Math.max(i, 0), terrainCols.length - 1);
     const col = terrainCols[ci];
     if (hTop < col.ceil || hBot > col.floor) { die(); return; }
+    if (col.divTop !== undefined && hBot > col.divTop && hTop < col.divBot) { die(); return; }
   }
 
   // Collision: hanging rocks
@@ -443,12 +655,33 @@ function updatePlay(dt) {
       die(); return;
     }
   }
+
+  // Collision: oscillating platforms
+  for (const b of blocks) {
+    if (hRight > b.worldX && hLeft < b.worldX + b.w &&
+        hBot  > b.y        && hTop  < b.y + b.h) {
+      die(); return;
+    }
+  }
+
+  // Collection: bonus pickups (never fatal to miss)
+  for (const p of pickups) {
+    if (!p.taken &&
+        hRight > p.worldX && hLeft < p.worldX + p.w &&
+        hBot  > p.y        && hTop  < p.y + p.h) {
+      p.taken = true;
+      bonus++;
+      spawnParticles((hLeft + hRight) / 2, (hTop + hBot) / 2, 10, '#ffffff', 30, 0.5, 1);
+    }
+  }
 }
 
 function die() {
-  spawnParticles(heli.x, heli.y, 20, '#ff8800', 50, 0.9, 2);
-  spawnParticles(heli.x, heli.y, 12, '#ffdd00', 30, 0.6, 1);
-  spawnParticles(heli.x, heli.y, 8,  '#ff2222', 60, 1.1, 2);
+  const sr = heliSpriteRect();
+  const ex = sr.x + sr.w / 2, ey = sr.y + sr.h / 2;
+  spawnParticles(ex, ey, 20, '#ff8800', 50, 0.9, 2);
+  spawnParticles(ex, ey, 12, '#ffdd00', 30, 0.6, 1);
+  spawnParticles(ex, ey, 8,  '#ff2222', 60, 1.1, 2);
   if (dist > best) best = dist;
   awaitingRelease = true;
   state = S.DEAD;
@@ -459,41 +692,56 @@ function renderPlay() {
   pxCtx.fillStyle = palette[biome.bg];
   pxCtx.fillRect(0, 0, PX_W, PX_H);
 
+  // Ambient atmosphere (behind everything, for depth)
+  renderParticleArray(ambient);
+
   // Terrain
   drawTerrain();
 
-  // Hanging rocks
+  // Obstacles
   drawRocks();
+  drawBlocks();
+  drawPickups();
 
   // Particles behind heli
-  renderParticles();
+  renderParticleArray(particles);
 
   // Helicopter
   const sr = heliSpriteRect();
   const hx = sr.x;
   const hy = sr.y;
-  drawSpriteScaled(SPR_HELI, palette, hx, hy, HELI_SCALE);
+  drawSpriteScaled(SPR_HELI, palette, hx, hy, 1);
 
-  // Rotor (animated bar above heli)
-  const rx = Math.round(heli.x - HELI_W * 0.5);
-  const ry = hy - Math.round(2 * HELI_SCALE);
-  const rw = Math.round((12 + Math.sin(heli.rotorPhase) * 10) * HELI_SCALE);
+  // Rotor -- animated bar above heli with a soft translucent blur halo
+  const cx = sr.x + sr.w / 2;
+  const ry = sr.y - 2;
+  const rw = Math.round(12 + Math.sin(heli.rotorPhase) * 10);
+  pxCtx.globalAlpha = 0.25;
+  pxCtx.fillStyle = palette[7] || palette[5];
+  pxCtx.fillRect(Math.round(cx - rw / 2 - 2), ry - 1, rw + 4, 3);
+  pxCtx.globalAlpha = 1;
   pxCtx.fillStyle = palette[5];
-  pxCtx.fillRect(rx - rw / 2, ry, rw, 1);
+  pxCtx.fillRect(Math.round(cx - rw / 2), ry, rw, 1);
 
   // HUD
   pxCtx.font = 'bold 8px monospace';
   pxCtx.fillStyle = palette[15] || '#ffffff';
   pxCtx.textAlign = 'left';
   pxCtx.fillText(biome.name, 4, 9);
+  if (bonus > 0) {
+    pxCtx.fillStyle = palette[biome.acc];
+    pxCtx.fillText('◆ ' + bonus, 4, 18);
+  }
+  pxCtx.fillStyle = palette[15] || '#ffffff';
   pxCtx.textAlign = 'right';
   pxCtx.fillText(Math.floor(dist) + 'm', PX_W - 4, 9);
 }
 
 function drawTerrain() {
-  const rd = palette[biome.rd];
-  const rl = palette[biome.rl];
+  const rd  = palette[biome.rd];
+  const rl  = palette[biome.rl];
   const acc = palette[biome.acc];
+  const div = palette[biome.acc];
 
   const ox = -Math.round(scrollOffset); // pixel offset for smooth scroll
 
@@ -508,10 +756,15 @@ function drawTerrain() {
     // Ceiling highlight edge
     pxCtx.fillStyle = rl;
     pxCtx.fillRect(x, col.ceil - 2, TERRAIN_STEP, 2);
-    // Accent pixel detail (stalactites / texture)
-    if ((i % 5) === 0 && col.ceil > 6) {
+    // Subtle inner shadow band for a 3-tone bevel
+    pxCtx.globalAlpha = 0.35;
+    pxCtx.fillStyle = '#000000';
+    pxCtx.fillRect(x, col.ceil - 7, TERRAIN_STEP, 2);
+    pxCtx.globalAlpha = 1;
+    // Stalactite detail -- length rolled once at generation so it stays put
+    if (col.decorCeil && col.ceil > 8) {
       pxCtx.fillStyle = acc;
-      pxCtx.fillRect(x, col.ceil - 4, 2, 3);
+      pxCtx.fillRect(x + 1, col.ceil - 2 - col.decorCeil, 2, col.decorCeil);
     }
 
     // Floor rock
@@ -520,10 +773,23 @@ function drawTerrain() {
     // Floor highlight edge
     pxCtx.fillStyle = rl;
     pxCtx.fillRect(x, col.floor, TERRAIN_STEP, 2);
-    // Accent pixel detail (stalagmites / texture)
-    if ((i % 7) === 0 && (PX_H - col.floor) > 6) {
+    pxCtx.globalAlpha = 0.35;
+    pxCtx.fillStyle = '#000000';
+    pxCtx.fillRect(x, col.floor + 5, TERRAIN_STEP, 2);
+    pxCtx.globalAlpha = 1;
+    // Stalagmite detail
+    if (col.decorFloor && (PX_H - col.floor) > 8) {
       pxCtx.fillStyle = acc;
-      pxCtx.fillRect(x + 1, col.floor + 1, 2, 3);
+      pxCtx.fillRect(x + 1, col.floor + 2, 2, col.decorFloor);
+    }
+
+    // Secret-path divider band, when a fork is splitting the gap here
+    if (col.divTop !== undefined) {
+      pxCtx.fillStyle = div;
+      pxCtx.fillRect(x, col.divTop, TERRAIN_STEP, col.divBot - col.divTop);
+      pxCtx.fillStyle = rl;
+      pxCtx.fillRect(x, col.divTop, TERRAIN_STEP, 1);
+      pxCtx.fillRect(x, col.divBot - 1, TERRAIN_STEP, 1);
     }
   }
 }
@@ -547,9 +813,46 @@ function drawRocks() {
   }
 }
 
+function drawBlocks() {
+  const rd  = palette[biome.rd];
+  const rl  = palette[biome.rl];
+  const acc = palette[biome.acc];
+  for (const b of blocks) {
+    const bx = Math.round(b.worldX);
+    const by = Math.round(b.y);
+    if (bx + b.w < 0 || bx > PX_W) continue;
+    // Lighter, metallic body distinguishes a moving platform from static rock
+    pxCtx.fillStyle = rl;
+    pxCtx.fillRect(bx, by, b.w, b.h);
+    pxCtx.fillStyle = rd;
+    pxCtx.fillRect(bx, by, b.w, 1);
+    pxCtx.fillRect(bx, by + b.h - 1, b.w, 1);
+    pxCtx.fillStyle = acc;
+    pxCtx.fillRect(bx + 1, by + 1, 1, 1);
+    pxCtx.fillRect(bx + b.w - 2, by + b.h - 2, 1, 1);
+  }
+}
+
+function drawPickups() {
+  const acc = palette[biome.acc];
+  for (const p of pickups) {
+    if (p.taken) continue;
+    const px_ = Math.round(p.worldX);
+    if (px_ + p.w < 0 || px_ > PX_W) continue;
+    const pulse = 0.5 + 0.5 * Math.sin(animClock * 6 + p.worldX * 0.3);
+    pxCtx.fillStyle = acc;
+    pxCtx.fillRect(px_ + 1, p.y, p.w - 2, p.h);
+    pxCtx.fillRect(px_, p.y + 1, p.w, p.h - 2);
+    pxCtx.globalAlpha = 0.5 + pulse * 0.5;
+    pxCtx.fillStyle = '#ffffff';
+    pxCtx.fillRect(Math.round(px_ + p.w/2 - 1), Math.round(p.y + p.h/2 - 1), 2, 2);
+    pxCtx.globalAlpha = 1;
+  }
+}
+
 // --- DEAD ---
 function updateDead(dt) {
-  updateParticles(dt);
+  updateParticleArray(particles, dt);
   if (awaitingRelease) {
     if (!thrust && !touch.down) awaitingRelease = false;
     return;
@@ -562,10 +865,13 @@ function renderDead() {
   pxCtx.fillRect(0, 0, PX_W, PX_H);
   drawTerrain();
   drawRocks();
-  renderParticles();
+  drawBlocks();
+  drawPickups();
+  renderParticleArray(particles);
+  const bonusTxt = bonus > 0 ? ('   ◆' + bonus) : '';
   drawOverlay(
     'CRASHED',
-    Math.floor(dist) + 'm    BEST ' + Math.floor(best) + 'm',
+    Math.floor(dist) + 'm    BEST ' + Math.floor(best) + 'm' + bonusTxt,
     'HOLD TO RETRY'
   );
 }
