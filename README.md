@@ -1,6 +1,6 @@
 # Game Showcase
 
-A Progressive Web App launcher for nine browser games. Installs to a phone home screen and
+A Progressive Web App launcher for ten browser games. Installs to a phone home screen and
 plays offline after the first load.
 
 **Live: https://thebalticone.github.io/arcade/**
@@ -12,7 +12,7 @@ Then Share → Add to Home Screen. It appears as "Arcade" and launches without t
 
 ## Games
 
-Pong · UFO Dash · Chopper · Snake · Pac-Man · Racer · Solitaire · Wolf · Tilt
+Pong · UFO Dash · Chopper · Snake · Pac-Man · Racer · Solitaire · Wolf · Tilt · Hangman
 
 Each lives in its own folder as `index.html` with a ⊞ button back to the launcher.
 `phagocyte.html` is also here but isn't on the launcher grid — reach it directly at
