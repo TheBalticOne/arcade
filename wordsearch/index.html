@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>WORD SEARCH</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { background: #0d0d0d; color: #eee; font-family: monospace; overflow: hidden;
+         display: flex; flex-direction: column; align-items: center;
+         padding: 52px 8px calc(10px + env(safe-area-inset-bottom)); user-select: none;
+         -webkit-user-select: none; -webkit-touch-callout: none; }
+  .menu-btn { position: fixed; top: 12px; right: 12px; z-index: 1000; padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: #fff; cursor: pointer; font-size: 12px; border-radius: 4px; font-family: monospace; }
+  .menu-btn:active { background: rgba(255,255,255,0.2); }
+  .hud { position: fixed; top: 12px; left: 12px; font-size: 12px; line-height: 1.5; color: #aaa; }
+  .hud b { color: #ffd166; }
+  #theme { font-size: 16px; letter-spacing: 3px; color: #8ecae6; text-transform: uppercase; margin-bottom: 8px; }
+  #grid { --s: min(94vw, 58vh, 480px); width: var(--s); height: var(--s);
+          display: grid; grid-template-columns: repeat(10, 1fr); background: #f4ecd8;
+          border-radius: 8px; padding: 1%; touch-action: none; flex-shrink: 0; }
+  .cell { display: flex; align-items: center; justify-content: center; color: #1a1a2e;
+          font: bold calc(var(--s) * 0.055) sans-serif; border-radius: 30%; }
+  .cell.sel { background: #ffd166 !important; }
+  #list { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; max-width: 480px;
+          margin-top: 14px; font-size: 15px; letter-spacing: 1px; }
+  #list span.done { text-decoration: line-through; color: #555; }
+  #win { display: none; margin-top: 14px; text-align: center; }
+  #win.show { display: block; }
+  #win p { color: #7ab648; font-size: 18px; margin-bottom: 10px; }
+  #win button { padding: 12px 28px; font: bold 16px monospace; background: #ffd166; color: #222;
+                border: none; border-radius: 6px; }
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
+<div class="hud">TIME <b id="time">0:00</b><br>FOUND <b id="count">0/0</b></div>
+<div id="theme"></div>
+<div id="grid"></div>
+<div id="list"></div>
+<div id="win"><p id="winMsg"></p><button id="again">NEW PUZZLE</button></div>
+<script>
+'use strict';
+
+const THEMES = {
+  Animals: 'ELEPHANT GIRAFFE PENGUIN KANGAROO OCTOPUS DOLPHIN CHEETAH HEDGEHOG SQUIRREL TORTOISE ZEBRA GORILLA FLAMINGO BADGER WALRUS PANTHER LOBSTER PEACOCK HAMSTER BEAVER MEERKAT OTTER RABBIT FERRET',
+  Food: 'PANCAKE AVOCADO BROCCOLI CHOCOLATE SANDWICH PINEAPPLE LASAGNE BURRITO PRETZEL DOUGHNUT RISOTTO CUCUMBER MUSHROOM CINNAMON BLUEBERRY OMELETTE DUMPLING TOMATO PORRIDGE CRUMPET SAUSAGE TRIFLE NOODLES WAFFLE',
+  Space: 'PLANET COMET GALAXY NEBULA ASTEROID ORBIT ROCKET SATURN JUPITER MARS VENUS MERCURY NEPTUNE URANUS ECLIPSE METEOR GRAVITY QUASAR PULSAR COSMOS LUNAR SOLAR STAR MOON',
+  Body: 'HEART LUNG LIVER KIDNEY SPLEEN BRAIN MUSCLE TENDON SKELETON STOMACH PANCREAS BLADDER ARTERY VEIN NEURON TONSIL RETINA CORNEA FEMUR PELVIS SPINE THYROID PLATELET ANTIBODY',
+  Sports: 'BADMINTON CRICKET CYCLING FENCING FOOTBALL HOCKEY JAVELIN KAYAKING MARATHON ROWING RUGBY SNOOKER SQUASH SURFING SWIMMING TENNIS ARCHERY BOXING CLIMBING DARTS GOLF SAILING SKIING POLO',
+  Weather: 'RAINBOW THUNDER LIGHTNING DRIZZLE BLIZZARD TORNADO HURRICANE MONSOON SUNSHINE HAILSTONE FOG MIST FROST BREEZE GALE DROUGHT CLOUD SLEET SNOWFLAKE HUMIDITY CYCLONE DEW TYPHOON SQUALL',
+};
+const N = 10, WORDS_PER = 8;
+const DIRS = [[0,1],[1,0],[1,1],[-1,1],[0,-1],[-1,0],[-1,-1],[1,-1]];
+const COLORS = ['#8ecae6','#a3e4a1','#f7a8b8','#c3b1e1','#ffb38a','#9ee6d8','#f2d479','#b8c5f2'];
+const $ = id => document.getElementById(id);
+const gridEl = $('grid');
+
+let letters, cells, words, found, startTime, timerId, start, sel, done;
+
+function rand(n) { return Math.floor(Math.random() * n); }
+
+// Place words longest-first at random positions/directions, letting them
+// cross where letters match. A word that won't fit after many tries is dropped.
+function build() {
+  const names = Object.keys(THEMES);
+  const theme = names[rand(names.length)];
+  const pool = THEMES[theme].split(' ').filter(w => w.length <= N).sort(() => Math.random() - .5);
+  const picked = pool.slice(0, WORDS_PER).sort((a, b) => b.length - a.length);
+  letters = new Array(N * N).fill('');
+  words = [];
+  for (const w of picked) {
+    for (let tries = 0; tries < 300; tries++) {
+      const [dr, dc] = DIRS[rand(8)];
+      const r0 = rand(N), c0 = rand(N);
+      const r1 = r0 + dr * (w.length - 1), c1 = c0 + dc * (w.length - 1);
+      if (r1 < 0 || r1 >= N || c1 < 0 || c1 >= N) continue;
+      let ok = true;
+      for (let k = 0; k < w.length && ok; k++) {
+        const ch = letters[(r0 + dr * k) * N + c0 + dc * k];
+        if (ch && ch !== w[k]) ok = false;
+      }
+      if (!ok) continue;
+      const idx = [];
+      for (let k = 0; k < w.length; k++) {
+        const i = (r0 + dr * k) * N + c0 + dc * k;
+        letters[i] = w[k];
+        idx.push(i);
+      }
+      words.push({ word: w, idx });
+      break;
+    }
+  }
+  for (let i = 0; i < N * N; i++) if (!letters[i]) letters[i] = String.fromCharCode(65 + rand(26));
+  return theme;
+}
+
+function newPuzzle() {
+  const theme = build();
+  $('theme').textContent = theme;
+  gridEl.innerHTML = '';
+  cells = letters.map(ch => {
+    const d = document.createElement('div');
+    d.className = 'cell';
+    d.textContent = ch;
+    gridEl.appendChild(d);
+    return d;
+  });
+  words.sort((a, b) => a.word < b.word ? -1 : 1);
+  $('list').innerHTML = '';
+  for (const w of words) {
+    w.el = document.createElement('span');
+    w.el.textContent = w.word;
+    $('list').appendChild(w.el);
+  }
+  found = 0; done = false; sel = []; start = null;
+  $('win').classList.remove('show');
+  $('count').textContent = `0/${words.length}`;
+  startTime = Date.now();
+  clearInterval(timerId);
+  timerId = setInterval(showTime, 1000);
+  showTime();
+}
+
+function fmt(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+function showTime() { $('time').textContent = fmt(Date.now() - startTime); }
+
+// --- Drag selection, snapped to the nearest of the 8 directions ---
+function cellAt(x, y) {
+  const r = gridEl.getBoundingClientRect();
+  const c = Math.floor((x - r.left) / r.width * N), rr = Math.floor((y - r.top) / r.height * N);
+  return [Math.max(0, Math.min(N - 1, rr)), Math.max(0, Math.min(N - 1, c))];
+}
+
+function setSel(endRC) {
+  const [r0, c0] = start, [r1, c1] = endRC;
+  const dr = r1 - r0, dc = c1 - c0;
+  const len = Math.max(Math.abs(dr), Math.abs(dc));
+  sel = [];
+  if (len === 0) sel = [r0 * N + c0];
+  else {
+    const ang = Math.round(Math.atan2(dr, dc) / (Math.PI / 4));
+    const sr = Math.round(Math.sin(ang * Math.PI / 4)), sc = Math.round(Math.cos(ang * Math.PI / 4));
+    for (let k = 0; k <= len; k++) {
+      const r = r0 + sr * k, c = c0 + sc * k;
+      if (r < 0 || r >= N || c < 0 || c >= N) break;
+      sel.push(r * N + c);
+    }
+  }
+  cells.forEach(el => el.classList.remove('sel'));
+  sel.forEach(i => cells[i].classList.add('sel'));
+}
+
+function release() {
+  cells.forEach(el => el.classList.remove('sel'));
+  // Match on the spelled letters, so a word also counts if the random
+  // filler happens to spell it somewhere other than where it was placed.
+  const s = sel.map(i => letters[i]).join(''), rev = [...s].reverse().join('');
+  const w = words.find(w => !w.found && (w.word === s || w.word === rev));
+  if (w) {
+    w.found = true;
+    w.el.className = 'done';
+    const col = COLORS[found % COLORS.length];
+    sel.forEach(i => cells[i].style.background = col);
+    found++;
+    $('count').textContent = `${found}/${words.length}`;
+    if (found === words.length) win();
+  }
+  sel = []; start = null;
+}
+
+function win() {
+  done = true;
+  clearInterval(timerId);
+  const t = Date.now() - startTime;
+  const best = +(localStorage.getItem('wordsearch-best') || 0);
+  const isBest = !best || t < best;
+  if (isBest) localStorage.setItem('wordsearch-best', t);
+  $('winMsg').textContent = `ALL FOUND IN ${fmt(t)}` + (isBest ? ' · NEW BEST!' : ` · BEST ${fmt(best)}`);
+  $('win').classList.add('show');
+}
+
+gridEl.addEventListener('pointerdown', e => {
+  if (done) return;
+  start = cellAt(e.clientX, e.clientY);
+  setSel(start);
+});
+window.addEventListener('pointermove', e => { if (start) setSel(cellAt(e.clientX, e.clientY)); });
+window.addEventListener('pointerup', () => { if (start) release(); });
+window.addEventListener('pointercancel', () => {
+  if (cells) cells.forEach(el => el.classList.remove('sel'));
+  sel = []; start = null;
+});
+
+$('again').onclick = newPuzzle;
+newPuzzle();
+</script>
+</body>
+</html>
