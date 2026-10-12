@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>BOGGLE</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { background: #0d0d0d; color: #eee; font-family: monospace; overflow: hidden;
+         display: flex; flex-direction: column; align-items: center;
+         padding: 52px 8px calc(10px + env(safe-area-inset-bottom)); user-select: none;
+         -webkit-user-select: none; -webkit-touch-callout: none; }
+  .menu-btn { position: fixed; top: 12px; right: 12px; z-index: 1000; padding: 8px 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); color: #fff; cursor: pointer; font-size: 12px; border-radius: 4px; font-family: monospace; }
+  .menu-btn:active { background: rgba(255,255,255,0.2); }
+  .hud { position: fixed; top: 12px; left: 12px; font-size: 12px; line-height: 1.5; color: #aaa; }
+  .hud b { color: #ffd166; }
+  #timer { font-size: 22px; font-weight: bold; color: #8ecae6; }
+  #timer.low { color: #ff6b6b; }
+  #current { height: 1.6em; font-size: 22px; font-weight: bold; letter-spacing: 3px; margin: 6px 0; }
+  #current.ok { color: #7ab648; } #current.dup { color: #ffd166; } #current.bad { color: #ff6b6b; }
+  #board { --s: min(92vw, 50vh, 440px); width: var(--s); height: var(--s);
+           display: grid; grid-template-columns: repeat(4, 1fr); gap: 2.5%; padding: 2.5%;
+           background: #1a3a6e; border-radius: 12px; touch-action: none; flex-shrink: 0; }
+  .tile { background: #f4ecd8; color: #1a1a2e; border-radius: 10%; display: flex;
+          align-items: center; justify-content: center; font: bold calc(var(--s) * 0.11) sans-serif;
+          box-shadow: inset 0 -4px 0 #c9bfa5; }
+  .tile.sel { background: #ffd166; box-shadow: inset 0 -4px 0 #d4a73a; }
+  .tile small { font-size: .6em; }
+  #found { flex: 1; overflow-y: auto; width: 100%; max-width: 440px; margin-top: 10px;
+           display: flex; flex-wrap: wrap; align-content: flex-start; gap: 4px 10px; font-size: 14px; color: #ccc; }
+  .screen { position: fixed; inset: 0; background: rgba(13,13,13,.97); z-index: 500; display: none;
+            flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 60px 20px 20px; }
+  .screen.show { display: flex; }
+  .screen h1 { font-size: 32px; letter-spacing: 6px; color: #ffd166; }
+  .screen p { color: #aaa; font-size: 13px; text-align: center; max-width: 320px; line-height: 1.5; }
+  .screen button { width: 220px; padding: 14px; font: bold 16px monospace; border: none; border-radius: 6px;
+                   background: #ffd166; color: #222; }
+  .screen button:disabled { background: #444; color: #888; }
+  #missed { max-width: 440px; width: 100%; max-height: 45vh; overflow-y: auto; font-size: 13px; color: #888;
+            display: flex; flex-wrap: wrap; gap: 4px 10px; justify-content: center; }
+  #missed b { color: #ccc; font-weight: normal; }
+</style>
+</head>
+<body>
+<button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
+<div class="hud">SCORE <b id="score">0</b><br>WORDS <b id="count">0</b></div>
+<div id="timer">3:00</div>
+<div id="current"></div>
+<div id="board"></div>
+<div id="found"></div>
+
+<div class="screen show" id="start">
+  <h1>BOGGLE</h1>
+  <p>Swipe through touching letters (diagonals count) to make words of 3+ letters. Drag back to undo a letter. 3 minutes.</p>
+  <p>BEST <b id="best" style="color:#ffd166">0</b></p>
+  <button id="startBtn" disabled>LOADING WORDS…</button>
+</div>
+<div class="screen" id="end">
+  <h1>TIME!</h1>
+  <p id="summary"></p>
+  <p>Words you missed:</p>
+  <div id="missed"></div>
+  <button id="againBtn">PLAY AGAIN</button>
+</div>
+<script>
+'use strict';
+
+const DICE = ['AAEEGN','ABBJOO','ACHOPS','AFFKPS','AOOTTW','CIMOTU','DEILRX','DELRVY',
+              'DISTTY','EEGHNW','EEINSU','EHRTVW','EIOSST','ELRTTY','HIMNUQ','HLNNRZ'];
+const ROUND_SECS = 180;
+const $ = id => document.getElementById(id);
+const boardEl = $('board');
+
+let WORDS = [];           // sorted, lowercase
+let WORDSET = new Set();
+let grid, tiles, path, found, score, timeLeft, timerId, playing;
+let best = +(localStorage.getItem('boggle-best') || 0);
+$('best').textContent = best;
+
+fetch('words.txt').then(r => r.text()).then(t => {
+  WORDS = t.split('\n').filter(Boolean);
+  WORDSET = new Set(WORDS);
+  $('startBtn').disabled = false;
+  $('startBtn').textContent = 'START';
+}).catch(() => { $('startBtn').textContent = 'COULD NOT LOAD WORDS'; });
+
+// Is any dictionary word starting with p? (binary search on the sorted list)
+function hasPrefix(p) {
+  let lo = 0, hi = WORDS.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (WORDS[m] < p) lo = m + 1; else hi = m; }
+  return lo < WORDS.length && WORDS[lo].startsWith(p);
+}
+
+const faceStr = i => grid[i] === 'Q' ? 'qu' : grid[i].toLowerCase();
+const adjacent = (a, b) => a !== b && Math.abs((a >> 2) - (b >> 2)) <= 1 && Math.abs((a & 3) - (b & 3)) <= 1;
+const points = w => w.length <= 4 ? 1 : w.length === 5 ? 2 : w.length === 6 ? 3 : w.length === 7 ? 5 : 11;
+
+function solve() {
+  const all = new Set();
+  const used = new Array(16).fill(false);
+  function dfs(i, s) {
+    s += faceStr(i);
+    if (!hasPrefix(s)) return;
+    if (s.length >= 3 && WORDSET.has(s)) all.add(s);
+    used[i] = true;
+    for (let j = 0; j < 16; j++) if (!used[j] && adjacent(i, j)) dfs(j, s);
+    used[i] = false;
+  }
+  for (let i = 0; i < 16; i++) dfs(i, '');
+  return all;
+}
+
+function newGame() {
+  const dice = DICE.slice().sort(() => Math.random() - .5);
+  grid = dice.map(d => d[Math.floor(Math.random() * 6)]);
+  boardEl.innerHTML = '';
+  tiles = grid.map(ch => {
+    const t = document.createElement('div');
+    t.className = 'tile';
+    t.innerHTML = ch === 'Q' ? 'Q<small>u</small>' : ch;
+    boardEl.appendChild(t);
+    return t;
+  });
+  path = []; found = new Set(); score = 0; timeLeft = ROUND_SECS; playing = true;
+  $('found').innerHTML = '';
+  $('current').textContent = '';
+  updateHud();
+  $('start').classList.remove('show');
+  $('end').classList.remove('show');
+  clearInterval(timerId);
+  timerId = setInterval(tick, 1000);
+  tick(true);
+}
+
+function tick(first) {
+  if (first !== true) timeLeft--;
+  const t = $('timer');
+  t.textContent = Math.floor(timeLeft / 60) + ':' + String(timeLeft % 60).padStart(2, '0');
+  t.className = timeLeft <= 20 ? 'low' : '';
+  if (timeLeft <= 0) endGame();
+}
+
+function updateHud() {
+  $('score').textContent = score;
+  $('count').textContent = found.size;
+}
+
+function endGame() {
+  clearInterval(timerId);
+  playing = false;
+  path = [];
+  tiles.forEach(t => t.classList.remove('sel'));
+  if (score > best) { best = score; localStorage.setItem('boggle-best', best); }
+  $('best').textContent = best;
+  const all = [...solve()];
+  const missed = all.filter(w => !found.has(w))
+                    .sort((a, b) => b.length - a.length || (a < b ? -1 : 1));
+  $('summary').textContent = `Score ${score} · ${found.size} of ${all.length} words · Best ${best}`;
+  $('missed').innerHTML = '';
+  for (const w of missed) {
+    const s = document.createElement(w.length >= 6 ? 'b' : 'span');
+    s.textContent = w.toUpperCase();
+    $('missed').appendChild(s);
+  }
+  $('end').classList.add('show');
+}
+
+// --- Swipe input ---
+// A tile only counts when the finger is near its centre, so diagonal
+// swipes don't clip the neighbouring tiles at the corners.
+function tileAt(x, y) {
+  for (let i = 0; i < 16; i++) {
+    const r = tiles[i].getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    if (Math.hypot(x - cx, y - cy) < r.width * 0.42) return i;
+  }
+  return -1;
+}
+
+const pathWord = () => path.map(faceStr).join('');
+
+function showCurrent(cls) {
+  const c = $('current');
+  c.textContent = pathWord().toUpperCase();
+  c.className = cls || '';
+}
+
+function extend(i) {
+  if (i < 0) return;
+  if (path.length >= 2 && path[path.length - 2] === i) {   // drag back = undo
+    tiles[path.pop()].classList.remove('sel');
+  } else if (!path.includes(i) && (path.length === 0 || adjacent(path[path.length - 1], i))) {
+    path.push(i);
+    tiles[i].classList.add('sel');
+  } else return;
+  showCurrent();
+}
+
+function submit() {
+  const w = pathWord();
+  tiles.forEach(t => t.classList.remove('sel'));
+  if (!w) return;
+  let cls;
+  if (w.length < 3 || !WORDSET.has(w)) cls = 'bad';
+  else if (found.has(w)) cls = 'dup';
+  else {
+    cls = 'ok';
+    found.add(w);
+    score += points(w);
+    const s = document.createElement('span');
+    s.textContent = w.toUpperCase();
+    $('found').prepend(s);
+    updateHud();
+  }
+  showCurrent(cls);
+  path = [];
+}
+
+let dragging = false;
+boardEl.addEventListener('pointerdown', e => {
+  if (!playing) return;
+  dragging = true;
+  path = [];
+  extend(tileAt(e.clientX, e.clientY));
+});
+window.addEventListener('pointermove', e => {
+  if (dragging && playing) extend(tileAt(e.clientX, e.clientY));
+});
+window.addEventListener('pointerup', () => {
+  if (!dragging) return;
+  dragging = false;
+  if (playing) submit();
+});
+window.addEventListener('pointercancel', () => { dragging = false; });
+
+$('startBtn').onclick = newGame;
+$('againBtn').onclick = newGame;
+</script>
+</body>
+</html>
