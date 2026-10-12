@@ -63,6 +63,7 @@
   <div id="missed"></div>
   <button id="againBtn">PLAY AGAIN</button>
 </div>
+<script src="words.js"></script>
 <script>
 'use strict';
 
@@ -78,12 +79,16 @@ let grid, tiles, path, found, score, timeLeft, timerId, playing;
 let best = +(localStorage.getItem('boggle-best') || 0);
 $('best').textContent = best;
 
-fetch('words.txt').then(r => r.text()).then(t => {
-  WORDS = t.split('\n').filter(Boolean);
+// words.js is a plain <script> rather than a fetch() so the game also
+// works when opened straight from disk (file://), where fetch is blocked.
+if (typeof WORDLIST === 'string') {
+  WORDS = WORDLIST.split(' ');
   WORDSET = new Set(WORDS);
   $('startBtn').disabled = false;
   $('startBtn').textContent = 'START';
-}).catch(() => { $('startBtn').textContent = 'COULD NOT LOAD WORDS'; });
+} else {
+  $('startBtn').textContent = 'COULD NOT LOAD WORDS';
+}
 
 // Is any dictionary word starting with p? (binary search on the sorted list)
 function hasPrefix(p) {
