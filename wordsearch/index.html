@@ -60,6 +60,21 @@ let letters, cells, words, found, startTime, timerId, start, sel, done;
 
 function rand(n) { return Math.floor(Math.random() * n); }
 
+// Cell indexes for w at a random start in direction [dr, dc], or null if it
+// runs off the grid or clashes with a different letter already placed.
+function tryPlace(w, [dr, dc]) {
+  const r0 = rand(N), c0 = rand(N);
+  const r1 = r0 + dr * (w.length - 1), c1 = c0 + dc * (w.length - 1);
+  if (r1 < 0 || r1 >= N || c1 < 0 || c1 >= N) return null;
+  const idx = [];
+  for (let k = 0; k < w.length; k++) {
+    const i = (r0 + dr * k) * N + c0 + dc * k;
+    if (letters[i] && letters[i] !== w[k]) return null;
+    idx.push(i);
+  }
+  return idx;
+}
+
 // Place words longest-first at random positions/directions, letting them
 // cross where letters match. A word that won't fit after many tries is dropped.
 function build() {
@@ -69,27 +84,20 @@ function build() {
   const picked = pool.slice(0, WORDS_PER).sort((a, b) => b.length - a.length);
   letters = new Array(N * N).fill('');
   words = [];
+  // Long words in a 10x10 grid rarely cross at a matching letter, so pure
+  // random directions snowball into all-parallel puzzles. Try the least-used
+  // axis first (DIRS[i] and DIRS[i+4] are the same line, reversed).
+  const axisUse = [0, 0, 0, 0];
   for (const w of picked) {
-    for (let tries = 0; tries < 300; tries++) {
-      const [dr, dc] = DIRS[rand(8)];
-      const r0 = rand(N), c0 = rand(N);
-      const r1 = r0 + dr * (w.length - 1), c1 = c0 + dc * (w.length - 1);
-      if (r1 < 0 || r1 >= N || c1 < 0 || c1 >= N) continue;
-      let ok = true;
-      for (let k = 0; k < w.length && ok; k++) {
-        const ch = letters[(r0 + dr * k) * N + c0 + dc * k];
-        if (ch && ch !== w[k]) ok = false;
-      }
-      if (!ok) continue;
-      const idx = [];
-      for (let k = 0; k < w.length; k++) {
-        const i = (r0 + dr * k) * N + c0 + dc * k;
-        letters[i] = w[k];
-        idx.push(i);
-      }
-      words.push({ word: w, idx });
-      break;
+    const axes = [0, 1, 2, 3].sort((a, b) => axisUse[a] - axisUse[b] || Math.random() - .5);
+    let idx = null;
+    for (const ax of axes) {
+      for (let tries = 0; tries < 150 && !idx; tries++) idx = tryPlace(w, DIRS[ax + 4 * rand(2)]);
+      if (idx) { axisUse[ax]++; break; }
     }
+    if (!idx) continue;
+    idx.forEach((i, k) => letters[i] = w[k]);
+    words.push({ word: w, idx });
   }
   for (let i = 0; i < N * N; i++) if (!letters[i]) letters[i] = String.fromCharCode(65 + rand(26));
   return theme;
