@@ -52,7 +52,7 @@
 
 <div class="screen show" id="start">
   <h1>BOGGLE</h1>
-  <p>Swipe through touching letters (diagonals count) to make words, even 1 or 2 letters (Latin counts too, like ET). Drag back to undo a letter. 90 seconds.</p>
+  <p>Swipe through touching letters (diagonals count) to make words, even 1 or 2 letters for ½ point (Latin counts too, like ET). Drag back to undo a letter. 90 seconds.</p>
   <p>BEST <b id="best" style="color:#ffd166">0</b></p>
   <button id="startBtn" disabled>LOADING WORDS…</button>
 </div>
@@ -99,7 +99,7 @@ function hasPrefix(p) {
 
 const faceStr = i => grid[i] === 'Q' ? 'qu' : grid[i].toLowerCase();
 const adjacent = (a, b) => a !== b && Math.abs((a >> 2) - (b >> 2)) <= 1 && Math.abs((a & 3) - (b & 3)) <= 1;
-const points = w => w.length <= 4 ? 1 : w.length === 5 ? 2 : w.length === 6 ? 3 : w.length === 7 ? 5 : 11;
+const points = w => w.length <= 2 ? 0.5 : w.length <= 4 ? 1 : w.length === 5 ? 2 : w.length === 6 ? 3 : w.length === 7 ? 5 : 11;
 
 function solve() {
   const all = new Set();
