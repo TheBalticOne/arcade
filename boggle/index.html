@@ -45,14 +45,14 @@
 <body>
 <button class="menu-btn" onclick="window.location.href='../'">⊞ Menu</button>
 <div class="hud">SCORE <b id="score">0</b><br>WORDS <b id="count">0</b></div>
-<div id="timer">3:00</div>
+<div id="timer">1:30</div>
 <div id="current"></div>
 <div id="board"></div>
 <div id="found"></div>
 
 <div class="screen show" id="start">
   <h1>BOGGLE</h1>
-  <p>Swipe through touching letters (diagonals count) to make words of 3+ letters. Drag back to undo a letter. 3 minutes.</p>
+  <p>Swipe through touching letters (diagonals count) to make words, even 1 or 2 letters (Latin counts too, like ET). Drag back to undo a letter. 90 seconds.</p>
   <p>BEST <b id="best" style="color:#ffd166">0</b></p>
   <button id="startBtn" disabled>LOADING WORDS…</button>
 </div>
@@ -69,7 +69,7 @@
 
 const DICE = ['AAEEGN','ABBJOO','ACHOPS','AFFKPS','AOOTTW','CIMOTU','DEILRX','DELRVY',
               'DISTTY','EEGHNW','EEINSU','EHRTVW','EIOSST','ELRTTY','HIMNUQ','HLNNRZ'];
-const ROUND_SECS = 180;
+const ROUND_SECS = 90;
 const $ = id => document.getElementById(id);
 const boardEl = $('board');
 
@@ -107,7 +107,7 @@ function solve() {
   function dfs(i, s) {
     s += faceStr(i);
     if (!hasPrefix(s)) return;
-    if (s.length >= 3 && WORDSET.has(s)) all.add(s);
+    if (WORDSET.has(s)) all.add(s);
     used[i] = true;
     for (let j = 0; j < 16; j++) if (!used[j] && adjacent(i, j)) dfs(j, s);
     used[i] = false;
@@ -207,7 +207,7 @@ function submit() {
   tiles.forEach(t => t.classList.remove('sel'));
   if (!w) return;
   let cls;
-  if (w.length < 3 || !WORDSET.has(w)) cls = 'bad';
+  if (!WORDSET.has(w)) cls = 'bad';
   else if (found.has(w)) cls = 'dup';
   else {
     cls = 'ok';
