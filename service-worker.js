@@ -1,7 +1,7 @@
 // Relative URLs resolve against this script's location, so the same file works
 // at the domain root and under a GitHub Pages project path (/arcade/).
 // Bump CACHE_NAME whenever a game changes, or clients keep serving the old copy.
-const CACHE_NAME = 'game-showcase-v10';
+const CACHE_NAME = 'game-showcase-v11';
 const urlsToCache = [
     './',
     './index.html',

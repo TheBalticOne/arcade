@@ -53,8 +53,10 @@
 <div class="screen show" id="start">
   <h1>BOGGLE</h1>
   <p>Swipe through touching letters (diagonals count) to make words, even 1 or 2 letters for ½ point (Latin counts too, like ET). Drag back to undo a letter. 90 seconds.</p>
-  <p>BEST <b id="best" style="color:#ffd166">0</b></p>
-  <button id="startBtn" disabled>LOADING WORDS…</button>
+  <p>Easy boards are packed with words; hard boards are sparse.</p>
+  <button class="lvlBtn" data-lvl="easy" disabled>LOADING WORDS…</button>
+  <button class="lvlBtn" data-lvl="normal" disabled></button>
+  <button class="lvlBtn" data-lvl="hard" disabled></button>
 </div>
 <div class="screen" id="end">
   <h1>TIME!</h1>
@@ -62,6 +64,7 @@
   <p>Words you missed:</p>
   <div id="missed"></div>
   <button id="againBtn">PLAY AGAIN</button>
+  <button id="levelBtn">CHANGE LEVEL</button>
 </div>
 <script src="words.js"></script>
 <script>
@@ -70,24 +73,33 @@
 const DICE = ['AAEEGN','ABBJOO','ACHOPS','AFFKPS','AOOTTW','CIMOTU','DEILRX','DELRVY',
               'DISTTY','EEGHNW','EEINSU','EHRTVW','EIOSST','ELRTTY','HIMNUQ','HLNNRZ'];
 const ROUND_SECS = 90;
+// Target count of real (3+ letter) words on the board. Random boards have a
+// median of ~90, but 5% have 30 or fewer.
+const LEVELS = {
+  easy:   { lo: 200, hi: Infinity, bestKey: 'boggle-best-easy' },
+  normal: { lo: 90,  hi: 160,      bestKey: 'boggle-best' },
+  hard:   { lo: 30,  hi: 60,       bestKey: 'boggle-best-hard' },
+};
 const $ = id => document.getElementById(id);
 const boardEl = $('board');
+const lvlBtns = [...document.querySelectorAll('.lvlBtn')];
 
 let WORDS = [];           // sorted, lowercase
 let WORDSET = new Set();
-let grid, tiles, path, found, score, timeLeft, timerId, playing;
-let best = +(localStorage.getItem('boggle-best') || 0);
-$('best').textContent = best;
+let grid, tiles, path, found, score, timeLeft, timerId, playing, level = 'normal';
+const bestOf = l => +(localStorage.getItem(LEVELS[l].bestKey) || 0);
+const labelLevels = () => lvlBtns.forEach(b =>
+  b.textContent = b.dataset.lvl.toUpperCase() + ' · best ' + bestOf(b.dataset.lvl));
 
 // words.js is a plain <script> rather than a fetch() so the game also
 // works when opened straight from disk (file://), where fetch is blocked.
 if (typeof WORDLIST === 'string') {
   WORDS = WORDLIST.split(' ');
   WORDSET = new Set(WORDS);
-  $('startBtn').disabled = false;
-  $('startBtn').textContent = 'START';
+  lvlBtns.forEach(b => b.disabled = false);
+  labelLevels();
 } else {
-  $('startBtn').textContent = 'COULD NOT LOAD WORDS';
+  lvlBtns[0].textContent = 'COULD NOT LOAD WORDS';
 }
 
 // Is any dictionary word starting with p? (binary search on the sorted list)
@@ -116,9 +128,34 @@ function solve() {
   return all;
 }
 
+// Roll the dice, then nudge (swap two dice, or re-roll one) until the number
+// of 3+ letter words lands in the level's range. Each step takes about 1ms,
+// and in testing every level settled within 100 steps.
+function dealBoard({ lo, hi }) {
+  let dice = DICE.slice().sort(() => Math.random() - .5);
+  let face = dice.map(() => Math.floor(Math.random() * 6));
+  const count = () => {
+    grid = dice.map((d, i) => d[face[i]]);
+    let n = 0;
+    for (const w of solve()) if (w.length >= 3) n++;
+    return n;
+  };
+  const miss = n => n < lo ? lo - n : n > hi ? n - hi : 0;
+  let n = count();
+  for (let step = 0; step < 500 && miss(n); step++) {
+    const oldDice = dice.slice(), oldFace = face.slice();
+    const a = Math.floor(Math.random() * 16), b = Math.floor(Math.random() * 16);
+    if (Math.random() < .5) { [dice[a], dice[b]] = [dice[b], dice[a]]; [face[a], face[b]] = [face[b], face[a]]; }
+    else face[a] = Math.floor(Math.random() * 6);
+    const m = count();
+    if (miss(m) <= miss(n)) n = m;
+    else { dice = oldDice; face = oldFace; }
+  }
+  grid = dice.map((d, i) => d[face[i]]);
+}
+
 function newGame() {
-  const dice = DICE.slice().sort(() => Math.random() - .5);
-  grid = dice.map(d => d[Math.floor(Math.random() * 6)]);
+  dealBoard(LEVELS[level]);
   boardEl.innerHTML = '';
   tiles = grid.map(ch => {
     const t = document.createElement('div');
@@ -156,8 +193,9 @@ function endGame() {
   playing = false;
   path = [];
   tiles.forEach(t => t.classList.remove('sel'));
-  if (score > best) { best = score; localStorage.setItem('boggle-best', best); }
-  $('best').textContent = best;
+  const best = Math.max(score, bestOf(level));
+  localStorage.setItem(LEVELS[level].bestKey, best);
+  labelLevels();
   const all = [...solve()];
   const missed = all.filter(w => !found.has(w))
                     .sort((a, b) => b.length - a.length || (a < b ? -1 : 1));
@@ -239,8 +277,9 @@ window.addEventListener('pointerup', () => {
 });
 window.addEventListener('pointercancel', () => { dragging = false; });
 
-$('startBtn').onclick = newGame;
+lvlBtns.forEach(b => b.onclick = () => { level = b.dataset.lvl; newGame(); });
 $('againBtn').onclick = newGame;
+$('levelBtn').onclick = () => { $('end').classList.remove('show'); $('start').classList.add('show'); };
 </script>
 </body>
 </html>
